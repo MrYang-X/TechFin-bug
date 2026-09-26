@@ -1,0 +1,143 @@
+# 科技金融指数研究（主题目录 A/A1）
+
+本目录是一个**完整自洽的采集主题**：两个采集脚本 + 一份印证报告脚本 + 主题配置，
+产物全部落在本目录下的输出根 `techfin_common_output/`。
+
+通用的爬虫机械（目录分配、日志、日期解析、清洗、导出、累积合并）在**仓库根**
+的 `crawler_common.py`，与主题无关，不要在本目录里复制一份。
+
+---
+
+## (a) 四个 py 的依赖关系
+
+**没有任何脚本互相 import。** 三个脚本是对等关系，只通过**文件**耦合——
+这点最容易误解，所以先把依赖图看清楚。
+
+```
+crawler_common.py    （仓库根；叶子模块：通用工具，不 import 任何本地模块）
+topic_config.py      （本目录；叶子模块：本主题的常量，不 import 任何本地模块）
+        ▲
+        │ import（三个脚本都 import 这两个）
+        ├── TechFin-bug.py              搜索引擎爬虫（百度 + 360）
+        ├── techfin_authoritative.py    官方政策源爬虫（人行 / 科技部 / 发改委）
+        └── verify_corpus.py            印证报告（不采集，只读语料）
+```
+
+数据流（脚本之间**只通过文件交互**，谁都不调用谁）：
+
+```
+TechFin-bug.py            ──写──→ <OUT_ROOT>/<日期-次数>/search_*
+                                   <OUT_ROOT>/tech_fin_news.csv      ← 累积总库
+
+techfin_authoritative.py  ──写──→ <OUT_ROOT>/<日期-次数>/official_*
+                                   <OUT_ROOT>/techfin_official.csv   ← 累积总库
+
+verify_corpus.py          ──读──→ 上面两个累积总库（或最新运行目录里的快照）
+                          ──写──→ <最新运行目录>/corpus_verification.md
+```
+
+> 为什么脚本开头有一段"向上找 `crawler_common.py`"的代码：Python 只把**脚本自身
+> 所在目录**放进 `sys.path`，**不会**自动包含父目录。本脚本在 `A/A1/`，而通用工具在
+> 仓库根，所以必须先把仓库根加进 `sys.path` 才能 import。那段代码是逐级向上找，
+> 不写死层数，因此 `A/A1`、`B/B2` 或更深的目录都能用。
+
+---
+
+## (b) 怎么用
+
+```bash
+cd E:\Python\bug\A\A1
+
+python TechFin-bug.py               # ① 采集搜索引擎语料（百度 + 360）
+python techfin_authoritative.py     # ② 采集官方政策源语料
+python verify_corpus.py             # ③ 生成交叉印证报告
+```
+
+- **① 和 ② 顺序任意，也可以只跑其中一个。** 两者共用同一个输出根，因此共用
+  "当日第 N 次爬取"的序号，各自占一个 `-N` 目录：
+  只跑 ① 得到 `2026.9.27-1/`（里面只有 `search_*`）；紧接着跑 ② 得到 `2026.9.27-2/`
+  （只有 `official_*`）。靠文件名前缀区分是哪个脚本产出的，**目录里不会混淆**。
+- **③ 必须在 ①② 都跑过之后。** 它依赖两份语料都存在，缺哪份会提示先跑对应的采集脚本。
+- 三个脚本都支持 `--output-dir <路径>` 临时改输出位置；不传就用 `topic_config.py`
+  里的 `OUTPUT_ROOT`。相对路径锚定到**本目录**（不是当前工作目录），也可以写绝对路径
+  把数据放到仓库外。**注意：换了输出位置，累积总库也跟着走，会在新位置从零开始累积**，
+  原来的数据不会自动搬过去。
+
+### 产物长什么样
+
+```
+techfin_common_output/
+├── tech_fin_news.csv          ← 累积总库（搜索引擎，跨轮读写）
+├── techfin_official.csv       ← 累积总库（官方源，跨轮读写）
+├── 2026.9.27-1/               ← 第 1 次爬取（TechFin-bug.py）
+│   ├── search_delta.csv            本轮采集（去重清洗后）
+│   ├── search_cumulative.csv       本轮结束时的累积快照
+│   ├── search_links.txt            链接清单，便于人工翻看
+│   ├── search_url_mapping.csv      链接映射
+│   └── search_log                  本轮完整日志
+└── 2026.9.27-2/               ← 第 2 次爬取（techfin_authoritative.py）
+    ├── official_delta.csv
+    ├── official_cumulative.csv
+    ├── official_links.txt
+    ├── official_log
+    └── corpus_verification.md      印证报告（由 ③ 写入被验证的那一轮）
+```
+
+日志由脚本自己写（`*_log`），**不需要再用 shell 重定向 `> run.log`**；
+好处是跑崩时的 traceback 也会落进日志。
+
+---
+
+## (c) 累积总库的更新时机与去重规则
+
+**更新时机**：不是流式实时，而是**每轮跑完在写出阶段一次性写入**。
+中途崩溃、或本轮没采到数据时，**总库完全不动**，不会被写坏。
+
+**去重键**：`article_id = md5(标题 + 链接)[:16]`，合并时 `keep="last"`。
+因此**完全相同的"标题 + 链接"不会重复入库**，且新一轮的解析结果会覆盖旧的。
+实测现有 111 条语料：`article_id` 与标题均 111/111 唯一、**0 重复**。
+
+**去重的边界**（务必了解，否则会把下面几种情况误判成 bug）：
+
+| 情况 | 结果 | 说明 |
+|---|---|---|
+| 同一事件被不同媒体转载 | **并存为多条** | 标题/链接都不同 → article_id 不同。这是**特性**：印证研究正需要多来源 |
+| 同一文章链接带不同追踪参数（如微信 `&scene=27`） | 会被当作两条 | 链接字符串不同 |
+| 360 的相对日期（"1天前"） | 重跑会**改写已存条目的 `date`** | `keep="last"` 的副作用；不新增重复，但会覆盖。`date_url`（链接内嵌日期）稳定，不受影响 |
+| 某轮只采到重复条目 | 总库条数不变 | 日志里的"净新增 0 条"就是这个意思 |
+
+每轮日志结尾会同时报两个数，**不要混淆**：
+
+```
+[归档] 本轮采集 70 条，其中相对累积总库净新增 3 条 | 累积 111 条
+```
+搜索引擎每轮会把同样的头条再返回一遍，所以"采集 70 条"可能只带来"净新增 3 条"。
+
+---
+
+## (d) 新增一个主题要做什么
+
+照抄本目录新建一个二级目录（如 `A/A2`），复制 `topic_config.py` 与三个脚本，然后**只改三处**：
+
+1. **`topic_config.py`** —— 这是主要工作：
+   - 检索词：`TECH_FIN_KEYWORDS` / `CORE_TERMS` / `QUALIFIER_TERMS` / `AUTH_KEYWORDS`
+   - 噪声源：`NOISE_DOMAINS` / `NOISE_SOURCES` / `NOISE_URL_SUFFIXES`
+   - 采集范围与节奏：`MAX_PAGES_*` / `MIN_DELAY` / `MAX_DELAY` / `OFFICIAL_DELAY` / `SAVE_ALL_ITEMS`
+   - 官方源清单：`SOURCES`
+   - 产物契约：`OUTPUT_ROOT`（换个输出根名）、`SEARCH_ACCUMULATOR` / `OFFICIAL_ACCUMULATOR`、`SEARCH_PREFIX` / `OFFICIAL_PREFIX`、`TOPIC_LABEL`
+2. **两个爬虫里与该主题站点相关的解析函数**（例如 `extract_source_date`、`extract_360_item`、`parse_list_rows` 的行容器启发式）——目标站变了就要跟着改。
+3. 输出根目录名（就是 `topic_config.OUTPUT_ROOT` 那一项）。
+
+**不需要碰 `crawler_common.py`。** 这正是把它拆出去的目的：通用机械一份，主题差异各管各的。
+不同主题的输出根互相独立，因此**当日序号互不干扰**（`resolve_run_dir` 只扫本主题的输出根，
+`A/A2` 的第一次爬取同样叫 `-1`）。
+
+### 一个已知限制
+
+各主题的配置模块都叫 `topic_config`，`sys.path` 又是全局的，因此
+**同一个 Python 进程里不能同时加载两个主题**（后加载的会拿到先加载的配置）。
+按本文档的用法（每个脚本一次独立进程）不会遇到；若你以后想写一个
+"一次跑完所有主题"的调度脚本，得改成子进程调用，或者把配置模块改成
+带主题名的唯一名字（如 `topic_config_a1.py`）。
+
+本目录的 `README.md` 本身也可以照抄给新主题，改动里面的路径与关键词即可。

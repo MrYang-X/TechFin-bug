@@ -1,0 +1,32 @@
+# build output
+dist/
+
+# 使用CLI时的提示词
+AGENTS.md
+CLAUDE.md
+
+# dependencies
+node_modules/
+
+# logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# environment variables
+.env
+.env.production
+
+# macOS-specific files
+.DS_Store
+
+# jetbrains setting folder
+.idea/
+__pycache__/
+
+# 爬取产物：每轮归档目录（形如 2026.9.27-1）内含累积总库的重复快照，
+# 会随爬取次数无限增长，故忽略；输出根下的累积总库（tech_fin_news.csv /
+# techfin_official.csv）仍纳入版本管理。
+# 模式匹配「四位年.月.日-次数」的目录名，与主题无关（A/A1、A/A2 均适用）。
+**/[0-9][0-9][0-9][0-9].[0-9]*.[0-9]*-[0-9]*/
