@@ -48,10 +48,45 @@ verify_corpus.py          ──读──→ 上面两个累积总库（或最�
 ```bash
 cd E:\Python\bug\A\A1
 
-python TechFin-bug.py               # ① 采集搜索引擎语料（百度 + 360）
+python TechFin-bug.py               # ① 采集搜索引擎语料（默认百度，见下）
 python techfin_authoritative.py     # ② 采集官方政策源语料
 python verify_corpus.py             # ③ 生成交叉印证报告
 ```
+
+### ① 是"指标化采集"：从检索词到指标 + 地区
+
+`TechFin-bug.py` 现在采集的不是一堆扁平关键词，而是**指标体系 × 地区口径**的检索计划
+（由 `topic_config.INDEX_KEYWORDS` + `GUANGDONG_REGIONS` 展平而来）。`INDEX_KEYWORDS`
+已补全 4 个一级维度 / 12 个二级指标 / **35 条三级指标**；但**命令行默认只采 A1**
+（`--level2` 默认 `["A1"]`），默认口径是
+**A1 三级指标 × 广东省 124 个县级单元 = 372 条检索式**。
+
+> 为什么默认不全量：百度资讯按 IP 限流，约 6~8 次快速请求即触发。全量 35 指标 ×
+> 124 单元 = 4340 条检索式，必须靠 `--level2` / `--cities` / `--offset` 分批推进。
+> 例如 `--level2 A1 A2 A3` 采完 A 维度，`--cities 广州市 深圳市` 按市分区。
+
+```bash
+python TechFin-bug.py --list-plan --limit 6      # 零请求，先看清要打哪些检索式
+python TechFin-bug.py --cities 广州市 深圳市      # 只采指定地级市（分区推进）
+python TechFin-bug.py --offset 0 --limit 6       # 分批切片，绕开百度限流
+python TechFin-bug.py --no-region                # 不带地区前缀，每个指标用全部展开式
+python TechFin-bug.py --sources 360              # 临时换源（默认只用百度，原因见下）
+```
+
+**为什么必须分批。** 百度资讯按 IP 限流，约 6~8 次快速请求即触发，而 372 条检索式
+远超这个额度——**单轮采不全是常态，不是故障**。完整性靠"切片 + 累积 + 重跑"：
+`--offset/--limit` 把计划切成小片，每片跑完结果合并进同一个累积总库（见 (c)），
+隔一段时间重跑即可补齐。每轮结尾的 `[覆盖率]` 会报各源成功了几条检索式，**缺口始终可见**。
+
+**为什么只用百度。** 实测：对"荔湾区 高新技术企业"这种"县级地区 + 指标词"检索式，
+**百度严格做 AND 约束**（返回 10 条里 9 条含地区名、8 条两词兼有），而**360 只做松散
+匹配**（同检索式两词兼有 0/10）——360 会跑几百次请求却几乎不产出。故
+`ENABLED_SOURCES` 默认只有 `["baidu"]`；360 若要启用，应改用省级等更宽的粒度。
+
+**锚点为什么默认不生效。** 主题锚点（`topic_config.ANCHOR_TERMS`）只在**不带地区**的
+检索式上启用。带地区时不再叠加——实测显示地区词本身已是强约束，再叠主题锚点属于
+重复约束，代价是把真数据杀掉：同一轮里被锚点丢弃的正是"荔湾区现有高新技术企业 302 家"
+"科技型中小企业申报"这类 A1 指标的核心语料。`ANCHOR_TERMS` 置空即全局关闭。
 
 - **① 和 ② 顺序任意，也可以只跑其中一个。** 两者共用同一个输出根，因此共用
   "当日第 N 次爬取"的序号，各自占一个 `-N` 目录：
@@ -95,7 +130,20 @@ techfin_common_output/
 
 **去重键**：`article_id = md5(标题 + 链接)[:16]`，合并时 `keep="last"`。
 因此**完全相同的"标题 + 链接"不会重复入库**，且新一轮的解析结果会覆盖旧的。
-实测现有 111 条语料：`article_id` 与标题均 111/111 唯一、**0 重复**。
+
+**新增列与新旧语料混存**：指标化采集给搜索引擎语料加了
+`level1_code / level1_name / level2_code / level2_name / level3_code / level3_name /
+unit / region_code / region_name / indicators` 这几列。**在这之前采的语料没有这些列**，
+合并时由 `merge_with_existing` 的 `fillna("")` 清成空串——**旧行指标列为空是正确语义**，
+它们本就不对应任何一条指标。下游做指标分析时用 `level3_code != ""` 过滤即可。
+
+一篇文章可能同时印证多条指标：单值的 `level3_code` / `level3_name` 取"首个命中"（便于聚合），
+`indicators` 列用 `+` 累积全部（如 `A1:高新技术企业数量/密度+A1:R&D经费支出占GDP比重`），
+与 `engines` 的多源叠加同款。
+
+> **`level3_code` 才是 join 键**（如 `A101`），`level3_name` 只是给人和报表看的显示名。
+> 指标中文名一旦修订（改口径、加限定词）就会变，而编码不变——所以与
+> `tech_finance_index.sql` 的 `dim_index` 关联时务必用 `level3_code`，不要用中文名。
 
 **去重的边界**（务必了解，否则会把下面几种情况误判成 bug）：
 
@@ -121,8 +169,15 @@ techfin_common_output/
 
 1. **`topic_config.py`** —— 这是主要工作：
    - 检索词：`TECH_FIN_KEYWORDS` / `CORE_TERMS` / `QUALIFIER_TERMS` / `AUTH_KEYWORDS`
+     （题目级扁平词，供官方源爬虫 `AUTH_KEYWORDS` 使用）
+   - 指标体系：`INDEX_KEYWORDS`（字段名对齐 `tech_finance_index.sql` 的 `dim_index`；
+     每条三级指标带 `level3_code` 稳定编码与 `min_region_level` 可得层级。**权重不在
+     这里维护**——爬虫不消费权重，唯一权威是 SQL 的 `dim_index` 表，避免两处漂移）
+     与 `ANCHOR_TERMS` / `QUERIES_PER_REGION`；地区口径 `GUANGDONG_REGIONS` /
+     `REGION_QUERY_NAME_OVERRIDES`（换省份就是换这两个常量）
    - 噪声源：`NOISE_DOMAINS` / `NOISE_SOURCES` / `NOISE_URL_SUFFIXES`
-   - 采集范围与节奏：`MAX_PAGES_*` / `MIN_DELAY` / `MAX_DELAY` / `OFFICIAL_DELAY` / `SAVE_ALL_ITEMS`
+   - 采集范围与节奏：`MAX_PAGES_PER_KEYWORD` / `MAX_PAGES_BY_SOURCE` / `MIN_DELAY` /
+     `MAX_DELAY` / `OFFICIAL_DELAY` / `SAVE_ALL_ITEMS`
    - 官方源清单：`SOURCES`
    - 产物契约：`OUTPUT_ROOT`（换个输出根名）、`SEARCH_ACCUMULATOR` / `OFFICIAL_ACCUMULATOR`、`SEARCH_PREFIX` / `OFFICIAL_PREFIX`、`TOPIC_LABEL`
 2. **两个爬虫里与该主题站点相关的解析函数**（例如 `extract_source_date`、`extract_360_item`、`parse_list_rows` 的行容器启发式）——目标站变了就要跟着改。

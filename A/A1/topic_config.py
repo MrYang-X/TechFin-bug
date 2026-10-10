@@ -28,6 +28,530 @@ QUALIFIER_TERMS = ["发展指数"]
 # 官方源用的筛选词。官方源是全量抓取后再筛，默认沿用上面那组。
 AUTH_KEYWORDS = TECH_FIN_KEYWORDS
 
+# ==================== 地区口径：广东省县级区划 ====================
+# 来源：民政部《2024 年中华人民共和国县以上行政区划代码》，与 tech_finance_index.sql
+# 的 dim_region 表同源同码。爬虫不连数据库（产物是 CSV），故区划清单以常量形式放这里。
+#
+# 结构：{地级市名: [(县级区划代码, 名称), ...]}。东莞市/中山市是不设区的地级市，
+# 下辖无县级单位，故以市本级（441900/442000）作为最细采集单元——否则这两个制造业
+# 大市会整个漏掉。共 21 市、124 个采集单元（122 个县级单位 + 东莞/中山 2 个市本级）。
+GUANGDONG_REGIONS = {
+    "广州市": [
+        ("440103", "荔湾区"),
+        ("440104", "越秀区"),
+        ("440105", "海珠区"),
+        ("440106", "天河区"),
+        ("440111", "白云区"),
+        ("440112", "黄埔区"),
+        ("440113", "番禺区"),
+        ("440114", "花都区"),
+        ("440115", "南沙区"),
+        ("440117", "从化区"),
+        ("440118", "增城区"),
+    ],
+    "韶关市": [
+        ("440203", "武江区"),
+        ("440204", "浈江区"),
+        ("440205", "曲江区"),
+        ("440222", "始兴县"),
+        ("440224", "仁化县"),
+        ("440229", "翁源县"),
+        ("440232", "乳源瑶族自治县"),
+        ("440233", "新丰县"),
+        ("440281", "乐昌市"),
+        ("440282", "南雄市"),
+    ],
+    "深圳市": [
+        ("440303", "罗湖区"),
+        ("440304", "福田区"),
+        ("440305", "南山区"),
+        ("440306", "宝安区"),
+        ("440307", "龙岗区"),
+        ("440308", "盐田区"),
+        ("440309", "龙华区"),
+        ("440310", "坪山区"),
+        ("440311", "光明区"),
+    ],
+    "珠海市": [
+        ("440402", "香洲区"),
+        ("440403", "斗门区"),
+        ("440404", "金湾区"),
+    ],
+    "汕头市": [
+        ("440507", "龙湖区"),
+        ("440511", "金平区"),
+        ("440512", "濠江区"),
+        ("440513", "潮阳区"),
+        ("440514", "潮南区"),
+        ("440515", "澄海区"),
+        ("440523", "南澳县"),
+    ],
+    "佛山市": [
+        ("440604", "禅城区"),
+        ("440605", "南海区"),
+        ("440606", "顺德区"),
+        ("440607", "三水区"),
+        ("440608", "高明区"),
+    ],
+    "江门市": [
+        ("440703", "蓬江区"),
+        ("440704", "江海区"),
+        ("440705", "新会区"),
+        ("440781", "台山市"),
+        ("440783", "开平市"),
+        ("440784", "鹤山市"),
+        ("440785", "恩平市"),
+    ],
+    "湛江市": [
+        ("440802", "赤坎区"),
+        ("440803", "霞山区"),
+        ("440804", "坡头区"),
+        ("440811", "麻章区"),
+        ("440823", "遂溪县"),
+        ("440825", "徐闻县"),
+        ("440881", "廉江市"),
+        ("440882", "雷州市"),
+        ("440883", "吴川市"),
+    ],
+    "茂名市": [
+        ("440902", "茂南区"),
+        ("440904", "电白区"),
+        ("440981", "高州市"),
+        ("440982", "化州市"),
+        ("440983", "信宜市"),
+    ],
+    "肇庆市": [
+        ("441202", "端州区"),
+        ("441203", "鼎湖区"),
+        ("441204", "高要区"),
+        ("441223", "广宁县"),
+        ("441224", "怀集县"),
+        ("441225", "封开县"),
+        ("441226", "德庆县"),
+        ("441284", "四会市"),
+    ],
+    "惠州市": [
+        ("441302", "惠城区"),
+        ("441303", "惠阳区"),
+        ("441322", "博罗县"),
+        ("441323", "惠东县"),
+        ("441324", "龙门县"),
+    ],
+    "梅州市": [
+        ("441402", "梅江区"),
+        ("441403", "梅县区"),
+        ("441422", "大埔县"),
+        ("441423", "丰顺县"),
+        ("441424", "五华县"),
+        ("441426", "平远县"),
+        ("441427", "蕉岭县"),
+        ("441481", "兴宁市"),
+    ],
+    "汕尾市": [
+        ("441502", "城区"),
+        ("441521", "海丰县"),
+        ("441523", "陆河县"),
+        ("441581", "陆丰市"),
+    ],
+    "河源市": [
+        ("441602", "源城区"),
+        ("441621", "紫金县"),
+        ("441622", "龙川县"),
+        ("441623", "连平县"),
+        ("441624", "和平县"),
+        ("441625", "东源县"),
+    ],
+    "阳江市": [
+        ("441702", "江城区"),
+        ("441704", "阳东区"),
+        ("441721", "阳西县"),
+        ("441781", "阳春市"),
+    ],
+    "清远市": [
+        ("441802", "清城区"),
+        ("441803", "清新区"),
+        ("441821", "佛冈县"),
+        ("441823", "阳山县"),
+        ("441825", "连山壮族瑶族自治县"),
+        ("441826", "连南瑶族自治县"),
+        ("441881", "英德市"),
+        ("441882", "连州市"),
+    ],
+    "东莞市": [("441900", "东莞市")],
+    "中山市": [("442000", "中山市")],
+    "潮州市": [
+        ("445102", "湘桥区"),
+        ("445103", "潮安区"),
+        ("445122", "饶平县"),
+    ],
+    "揭阳市": [
+        ("445202", "榕城区"),
+        ("445203", "揭东区"),
+        ("445222", "揭西县"),
+        ("445224", "惠来县"),
+        ("445281", "普宁市"),
+    ],
+    "云浮市": [
+        ("445302", "云城区"),
+        ("445303", "云安区"),
+        ("445321", "新兴县"),
+        ("445322", "郁南县"),
+        ("445381", "罗定市"),
+    ],
+}
+
+# 检索式里用哪个名字。默认取区划名称，个别泛化到无法检索的单独覆盖。
+# 例：汕尾市城区（441502）的规范名就叫"城区"，单独检索会命中一堆无关结果。
+REGION_QUERY_NAME_OVERRIDES = {
+    "441502": "汕尾城区",
+}
+
+# ==================== 指标体系（与 tech_finance_index.sql 的 dim_index 同构） ====================
+# 字段名逐一对齐 dim_index 的列名（level1_code/level1_name/level1_weight、
+# level2_code/level2_name、level3_code/level3_name、unit），
+# 将来 CSV → SQL join 不用再改名。level2_code 取自下面的字典键（"A1"/"B2"…）。
+#
+# 权重（level1_weight/level2_weight/level3_weight）【不在这里维护】——爬虫不消费权重，
+# 放两份只会互相漂移。权重的唯一权威在 tech_finance_index.sql 的 dim_index 表。
+#
+# 指标的县域适用性（is_county_applicable）与替代口径（county_replacement）同样
+# 【只活在 DB 的 dim_index 里】。它们是研究设计元数据，对每条语料行都是噪声，
+# 不进 CSV、不进 SEARCH_COLS。
+#
+# 指标名是【统计口径名】而不是新闻常用短语——"高新技术企业数量/密度"带斜杠，
+# 中文新闻里说"研发"而不是"R&D"。所以每条指标展开成若干检索式，按优先级排列。
+# 带地区前缀采集时只取前 QUERIES_PER_REGION 条（地区 × 指标会成倍放大请求量）。
+#
+# 【2024 版复合指标已拆分】原 30 条里有 5 条把两个度量塞在一行（单位形如"亿元/%"），
+# 单个 DECIMAL 列装不下、也无法统一赋权，已拆成单一单位（30 → 35 条）：
+#   A202+A203 / B101+B102 / B201+B202 / B203+B204 / C302+C303
+INDEX_KEYWORDS = {
+    "A1": {
+        "level1_code": "A",
+        "level1_name": "科技金融资源基础",
+        "level1_weight": 25.00,
+        "level2_name": "科技企业资源",
+        "indicators": [
+            {
+                "level3_code": "A101",
+                "level3_name": "高新技术企业数量/密度",
+                "unit": "家或家/万人",
+                "queries": ["高新技术企业", "高新技术企业 认定", "高新技术企业 数量"],
+            },
+            {
+                "level3_code": "A102",
+                "level3_name": "科技型中小企业库入库数量",
+                "unit": "家",
+                "queries": ["科技型中小企业 入库", "科技型中小企业 评价"],
+            },
+            {
+                "level3_code": "A103",
+                "level3_name": "R&D经费支出占GDP比重",
+                "unit": "%",
+                "queries": ["研发经费投入强度", "R&D经费 占GDP比重", "全社会研发投入"],
+            },
+        ],
+    },
+    "A2": {
+        "level1_code": "A",
+        "level1_name": "科技金融资源基础",
+        "level1_weight": 25.00,
+        "level2_name": "金融资源供给",
+        "indicators": [
+            {
+                "level3_code": "A201",
+                "level3_name": "本外币存款余额",
+                "unit": "亿元",
+                "queries": ["本外币存款余额", "金融机构 存款余额", "存款余额 统计公报"],
+            },
+            {
+                "level3_code": "A202",
+                "level3_name": "私募股权/创业投资机构数量",
+                "unit": "家",
+                "queries": ["私募股权 创业投资 机构", "创业投资机构 数量", "私募基金管理人 数量"],
+            },
+            {
+                "level3_code": "A203",
+                "level3_name": "私募股权/创业投资机构管理资本量",
+                "unit": "亿元",
+                "queries": ["创业投资 管理资本", "私募股权 管理规模", "创投机构 管理资金"],
+            },
+            {
+                "level3_code": "A204",
+                "level3_name": "银行业金融机构网点密度",
+                "unit": "个/万人",
+                "queries": ["银行业金融机构 网点", "银行网点 数量", "金融机构 营业网点"],
+            },
+        ],
+    },
+    "A3": {
+        "level1_code": "A",
+        "level1_name": "科技金融资源基础",
+        "level1_weight": 25.00,
+        "level2_name": "政府支持力度",
+        "indicators": [
+            {
+                "level3_code": "A301",
+                "level3_name": "财政科技拨款占公共预算支出比重",
+                "unit": "%",
+                "queries": ["财政科技拨款", "科技支出 占比", "财政科技投入 比重"],
+            },
+            {
+                "level3_code": "A302",
+                "level3_name": "科技金融风险补偿资金池规模",
+                "unit": "万元",
+                "queries": ["科技金融 风险补偿 资金池", "科技信贷 风险补偿", "风险补偿基金 规模"],
+            },
+        ],
+    },
+
+    "B1": {
+        "level1_code": "B",
+        "level1_name": "科技金融活动强度",
+        "level1_weight": 35.00,
+        "level2_name": "债权融资活跃度",
+        "indicators": [
+            {
+                "level3_code": "B101",
+                "level3_name": "科技企业贷款余额",
+                "unit": "亿元",
+                "queries": ["科技企业贷款余额", "科技贷款 余额", "高新技术企业 贷款 余额"],
+            },
+            {
+                "level3_code": "B102",
+                "level3_name": "科技企业贷款余额增速",
+                "unit": "%",
+                "queries": ["科技贷款 增速", "科技企业贷款 同比增长", "科技贷款 增长"],
+            },
+            {
+                "level3_code": "B103",
+                "level3_name": "知识产权质押融资额",
+                "unit": "亿元",
+                "queries": ["知识产权质押融资", "专利质押 融资金额", "商标质押 融资"],
+            },
+            {
+                "level3_code": "B104",
+                "level3_name": "信用贷款占比",
+                "unit": "%",
+                "queries": ["信用贷款 占比", "科技企业 信用贷款", "信用贷款 比例"],
+            },
+        ],
+    },
+    "B2": {
+        "level1_code": "B",
+        "level1_name": "科技金融活动强度",
+        "level1_weight": 35.00,
+        "level2_name": "股权融资活跃度",
+        "indicators": [
+            {
+                "level3_code": "B201",
+                "level3_name": "VC/PE投资案例数",
+                "unit": "起",
+                "queries": ["创业投资 案例数", "股权投资 案例", "VC PE 投资 案例"],
+            },
+            {
+                "level3_code": "B202",
+                "level3_name": "VC/PE投资金额",
+                "unit": "亿元",
+                "queries": ["股权投资 金额", "创业投资 投资金额", "VC PE 投资额"],
+            },
+            {
+                "level3_code": "B203",
+                "level3_name": "科创板/创业板等上市科技企业数量",
+                "unit": "家",
+                "queries": ["科创板 上市 企业 数量", "创业板 上市 科技企业", "科技企业 上市 数量"],
+            },
+            {
+                "level3_code": "B204",
+                "level3_name": "科创板/创业板等上市科技企业募资额",
+                "unit": "亿元",
+                "queries": ["科创板 募资额", "创业板 首发募资", "上市 募资 规模"],
+            },
+        ],
+    },
+    "B3": {
+        "level1_code": "B",
+        "level1_name": "科技金融活动强度",
+        "level1_weight": 35.00,
+        "level2_name": "政策性融资效果",
+        "indicators": [
+            {
+                "level3_code": "B301",
+                "level3_name": "科技保险保费收入",
+                "unit": "亿元",
+                "queries": ["科技保险 保费收入", "科技保险 保费", "科技保险 试点"],
+            },
+            {
+                "level3_code": "B302",
+                "level3_name": "创业担保贷款发放额",
+                "unit": "亿元",
+                "queries": ["创业担保贷款 发放", "创业担保贷款 金额", "创业担保贷款"],
+            },
+        ],
+    },
+    "B4": {
+        "level1_code": "B",
+        "level1_name": "科技金融活动强度",
+        "level1_weight": 35.00,
+        "level2_name": "金融科技应用",
+        "indicators": [
+            {
+                "level3_code": "B401",
+                "level3_name": "移动支付交易额",
+                "unit": "亿元",
+                "queries": ["移动支付 交易额", "移动支付 交易规模", "移动支付 金额"],
+            },
+            {
+                "level3_code": "B402",
+                "level3_name": "数字普惠金融指数",
+                "unit": "指数值",
+                "queries": ["数字普惠金融指数", "普惠金融 指数", "数字普惠金融"],
+            },
+            {
+                "level3_code": "B403",
+                "level3_name": "大数据/AI在风控中的应用情况",
+                "unit": "定性/评分",
+                "queries": ["大数据 风控 应用", "人工智能 风控", "金融科技 风险管理"],
+            },
+        ],
+    },
+
+    "C1": {
+        "level1_code": "C",
+        "level1_name": "科技金融产出效能",
+        "level1_weight": 30.00,
+        "level2_name": "科技创新产出",
+        "indicators": [
+            {
+                "level3_code": "C101",
+                "level3_name": "PCT国际专利申请量",
+                "unit": "件",
+                "queries": ["PCT 专利申请量", "PCT 国际专利", "国际专利申请"],
+            },
+            {
+                "level3_code": "C102",
+                "level3_name": "技术合同成交额",
+                "unit": "亿元",
+                "queries": ["技术合同成交额", "技术合同 成交金额", "技术交易 成交额"],
+            },
+            {
+                "level3_code": "C103",
+                "level3_name": "每万人发明专利拥有量",
+                "unit": "件/万人",
+                "queries": ["每万人发明专利拥有量", "发明专利 拥有量", "万人发明专利"],
+            },
+        ],
+    },
+    "C2": {
+        "level1_code": "C",
+        "level1_name": "科技金融产出效能",
+        "level1_weight": 30.00,
+        "level2_name": "经济发展贡献",
+        "indicators": [
+            {
+                "level3_code": "C201",
+                "level3_name": "高新技术产业产值占规上工业产值比重",
+                "unit": "%",
+                "queries": ["高新技术产业产值 占比", "高新技术产业 产值 比重", "高技术制造业 产值 占比"],
+            },
+            {
+                "level3_code": "C202",
+                "level3_name": "科技服务业增加值",
+                "unit": "亿元",
+                "queries": ["科技服务业 增加值", "科技服务 增加值", "科技服务业 收入"],
+            },
+        ],
+    },
+    "C3": {
+        "level1_code": "C",
+        "level1_name": "科技金融产出效能",
+        "level1_weight": 30.00,
+        "level2_name": "企业成长性",
+        "indicators": [
+            {
+                "level3_code": "C301",
+                "level3_name": '"独角兽"、"瞪羚"企业数量',
+                "unit": "家",
+                "queries": ["独角兽企业 数量", "瞪羚企业 数量", "独角兽 瞪羚 企业"],
+            },
+            {
+                "level3_code": "C302",
+                "level3_name": "科技企业营收增长率",
+                "unit": "%",
+                "queries": ["科技企业 营收增长率", "高新技术企业 营收 增长", "科技企业 营业收入 增速"],
+            },
+            {
+                "level3_code": "C303",
+                "level3_name": "科技企业利润增长率",
+                "unit": "%",
+                "queries": ["科技企业 利润增长率", "高新技术企业 利润 增长", "科技企业 净利润 增速"],
+            },
+        ],
+    },
+
+    "D1": {
+        "level1_code": "D",
+        "level1_name": "科技金融生态环境",
+        "level1_weight": 10.00,
+        "level2_name": "政策与服务环境",
+        "indicators": [
+            {
+                "level3_code": "D101",
+                "level3_name": "科技金融政策完备度（专家打分）",
+                "unit": "分",
+                "queries": ["科技金融 政策", "科技金融 政策体系", "科技金融 实施方案"],
+            },
+            {
+                "level3_code": "D102",
+                "level3_name": "科技金融服务中心/网点覆盖情况",
+                "unit": "个或%",
+                "queries": ["科技金融服务中心", "科技金融服务 网点", "科技金融 服务站"],
+            },
+        ],
+    },
+    "D2": {
+        "level1_code": "D",
+        "level1_name": "科技金融生态环境",
+        "level1_weight": 10.00,
+        "level2_name": "人力与创新环境",
+        "indicators": [
+            {
+                "level3_code": "D201",
+                "level3_name": "R&D人员全时当量",
+                "unit": "人年",
+                "queries": ["R&D人员全时当量", "研发人员 全时当量", "R&D人员"],
+            },
+            {
+                "level3_code": "D202",
+                "level3_name": "普通高等学校数量",
+                "unit": "所",
+                "queries": ["普通高等学校 数量", "高等学校 数量", "高校 数量"],
+            },
+            {
+                "level3_code": "D203",
+                "level3_name": "数字经济发展指数",
+                "unit": "指数值",
+                "queries": ["数字经济发展指数", "数字经济 指数", "数字经济 发展水平"],
+            },
+        ],
+    },
+}
+
+# 锚点词（OR 集）：指标判别词偏泛，命中后还须与下列【任一】锚点共现才入库。
+#
+# 【实测结论·勿删】锚点只对【不带地区】的检索式启用，带地区的一律不加——
+# 地区词本身已经是强约束（实测百度对"荔湾区 高新技术企业"返回 10 条里 9 条含
+# "荔湾区"、8 条同时含两个词），再叠一层主题锚点属于重复约束，代价是把真数据杀掉：
+# 同一轮里被锚点丢弃的正是"荔湾区现有高新技术企业 302 家""科技型中小企业申报"
+# 这类 A1 指标的核心语料。故带地区检索式只要求"地区 + 指标词"共现。
+# 不带地区时锚点仍然有用（防止"高新技术企业"泛化到全国无关报道）。
+# 收紧/放宽只改这里；置空列表即全局关闭该约束。
+ANCHOR_TERMS = ["科技金融", "金融科技", "科技创新", "科技企业",
+                "科技成果转化", "高新区", "高新技术产业", "科创"]
+
+# 带地区前缀采集时，每条指标取前 N 条检索式（见 INDEX_KEYWORDS 上方说明）
+QUERIES_PER_REGION = 1
+
 # ==================== 噪声源黑名单 ====================
 
 # 非新闻源：百科词条、行情页、厂商专题页等，不属于新闻语料
@@ -45,10 +569,21 @@ NOISE_URL_SUFFIXES = [".pdf"]
 # ==================== 采集范围与节奏 ====================
 
 # 搜索引擎：启用哪些源。某源被限流时只跳过该源，其它源继续。
-ENABLED_SOURCES = ["baidu", "360"]
-MAX_PAGES_PER_KEYWORD = 3
-MIN_DELAY = 5.0
-MAX_DELAY = 12.0
+#
+# 【实测结论·勿删】指标化采集【只用百度】。本轮检索式是"县级地区 + 指标词"，
+# 百度会严格做 AND 约束（实测"荔湾区 高新技术企业"返回 10 条有 9 条含地区名、
+# 8 条两词兼有），而 360 只做松散匹配（同检索式两词兼有 0/10）——360 跑几百次
+# 请求却几乎不产出。360 若要启用，应改用省级等更宽的粒度，而不是县级。
+ENABLED_SOURCES = ["baidu"]
+
+# 每个源翻多少页。指标检索式取首屏即够，额度要花在"多检索式"而不是"多翻页"上。
+MAX_PAGES_PER_KEYWORD = 3          # 默认值（未在 MAX_PAGES_BY_SOURCE 中指定的源用它）
+MAX_PAGES_BY_SOURCE = {
+    "baidu": 1,
+}
+# 百度按 IP 限流（约 6~8 次快速请求即触发），指标采集请求总量大，把间隔拉长
+MIN_DELAY = 12.0
+MAX_DELAY = 25.0
 
 # 官方源：每个源翻多少页（页数直接决定回溯的年头）
 MAX_PAGES_PER_SOURCE = 10
@@ -117,12 +652,108 @@ ACCUMULATOR_FILES = {
 REPORT_NAME = "corpus_verification.md"
 
 # 列顺序：链接与日期放显眼位置，方便手动查看
+# 注：level* / region* / indicators 是"A1 指标化采集"新增的列。旧语料（题目级关键词采的
+# 那批）没有这些列，合并时会被 fillna("") 清成空串——旧行指标列为空是【正确语义】，
+# 它们本就不对应任何一条指标。下游做指标分析时用 level3_name != "" 过滤即可。
 SEARCH_COLS = [
     "article_id", "title", "source", "date", "date_raw", "date_url",
-    "keyword", "engine", "engines", "url", "real_url",
+    "keyword",
+    "level1_code", "level1_name", "level2_code", "level2_name",
+    "level3_code", "level3_name", "unit",
+    "region_code", "region_name",
+    "indicators",
+    "engine", "engines", "url", "real_url",
     "summary", "title_is_url", "crawl_time",
 ]
 OFFICIAL_COLS = [
     "article_id", "title", "source", "date", "date_raw", "keyword",
     "url", "crawl_time",
 ]
+
+
+# ==================== 检索计划生成 ====================
+# 下面是纯数据变换（不 import 本地模块、不读数据库、不发请求），把上面的常量展平成
+# 爬虫直接消费的检索计划。放在配置里而不是爬虫里，是为了让"A1 有哪些指标、每个指标
+# 用什么词、覆盖哪些地区"这件事始终只用改这一个文件。
+
+def guangdong_regions(cities=None):
+    """
+    展平 GUANGDONG_REGIONS 为 [(region_code, region_name, query_name, city_name), ...]。
+
+    query_name 是实际拼进检索式的名字（默认取区划名，个别泛化名见
+    REGION_QUERY_NAME_OVERRIDES）。cities 非空时只取指定地级市，便于按市分区推进。
+    东莞/中山是不设区的地级市，GUANGDONG_REGIONS 里以市本级作为唯一单元。
+    """
+    out = []
+    for city, units in GUANGDONG_REGIONS.items():
+        if cities and city not in cities:
+            continue
+        for code, name in units:
+            out.append((code, name, REGION_QUERY_NAME_OVERRIDES.get(code, name), city))
+    return out
+
+
+def _make_plan(node, l2, ind, query, region_code, region_name, city_name,
+               anchor_terms):
+    return {
+        "query": query,
+        "level1_code": node["level1_code"],
+        "level1_name": node["level1_name"],
+        "level2_code": l2,
+        "level2_name": node["level2_name"],
+        "level3_code": ind["level3_code"],
+        "level3_name": ind["level3_name"],
+        "unit": ind["unit"],
+        "region_code": region_code,
+        "region_name": region_name,
+        "city_name": city_name,
+        # 带地区时为 ()（地区词已是强约束，见 ANCHOR_TERMS 上方实测说明）；
+        # 不带地区时用主题锚点，防止"高新技术企业"泛化到全国无关报道。
+        "anchor_terms": anchor_terms,
+    }
+
+
+def build_search_plan(level2_codes=None, regions=None, queries_per_region=None,
+                      offset=0, limit=None):
+    """
+    把 INDEX_KEYWORDS 展平成爬虫直接消费的检索计划（每个检索式一条 dict）。
+
+    参数：
+      level2_codes        只展开指定二级指标（如 ["A1"]）；None 表示全部。
+      regions             guangdong_regions() 的返回值（[(code, name, query_name, city)]）。
+                          非空时，检索式前拼地区名（如"南山区 高新技术企业"），且每条指标
+                          只取前 queries_per_region 条检索式。传空/None 则不带地区。
+      queries_per_region  带地区时每条指标取几条检索式，默认 QUERIES_PER_REGION。
+      offset / limit      对最终计划切片。地区为外层、指标为内层，所以一片 = 若干个完整
+                          地区，用于把总请求量切成多次运行，绕开百度按 IP 限流。
+
+    返回的 list 直接交给 TechFin-bug.crawl_all_keywords()。
+    """
+    regions = list(regions or [])
+    if queries_per_region is None:
+        queries_per_region = QUERIES_PER_REGION
+
+    # 指标维度的展开（地区为内层时复用这份）
+    base = []
+    for l2, node in INDEX_KEYWORDS.items():
+        if level2_codes and l2 not in level2_codes:
+            continue
+        for ind in node["indicators"]:
+            queries = ind["queries"]
+            if regions:
+                queries = queries[:queries_per_region]
+            for q in queries:
+                base.append((l2, node, ind, q))
+
+    plans = []
+    if regions:
+        for code, name, qname, city in regions:
+            for l2, node, ind, q in base:
+                plans.append(_make_plan(node, l2, ind, f"{qname} {q}", code, name,
+                                        city, ()))
+    else:
+        for l2, node, ind, q in base:
+            plans.append(_make_plan(node, l2, ind, q, "", "", "",
+                                    tuple(ANCHOR_TERMS)))
+
+    return plans[offset: None if limit is None else offset + limit]

@@ -204,21 +204,31 @@ def clean_text(text):
     return text
 
 
-def is_relevant(text, keyword, core_terms, qualifier_terms=()):
+def is_relevant(text, keyword, core_terms, qualifier_terms=(), anchor_terms=()):
     """
     判断一条结果是否与当前检索词相关。检索词由主题配置传入，本模块不认识任何
     具体词——所以它对主题无感，新增主题只需改配置。
 
+    - 分词：keyword 按空白切分，要求【全部 token 命中】。检索式是多词的
+      （如"南山区 高新技术企业"），搜索引擎按 AND 语义返回，正文里不会出现
+      整串字面量，故不能按整串包含判断——否则多词检索式会被静默过滤成 0 条。
+      无空格的旧关键词分词后与原"整串包含"完全等价，行为不变。
     - 限定词（qualifier_terms）：必须与任一核心词共现，否则算噪声。
       例：科技金融主题里"发展指数"单独检索会命中教育强国指数、人类发展指数、
       商贸零售上市公司发展指数等无关内容，故要求与"科技金融/金融科技"共现。
-    - 其余检索词：按普通包含匹配处理。
+    - 锚点（anchor_terms）：非空时，命中后还须与任一锚点共现。供"指标检索式"用
+      ——指标词（如"高新技术企业"）过于泛化，要求与主题锚点共现才算数。
+      默认空元组 = 不做此约束，旧的调用方行为完全不变。
     """
     if not text:
         return False
-    if keyword in qualifier_terms:
-        return keyword in text and any(c in text for c in core_terms)
-    return keyword in text
+    tokens = [t for t in keyword.split() if t]
+    hit = bool(tokens) and all(t in text for t in tokens)
+    if hit and keyword in qualifier_terms:
+        hit = any(c in text for c in core_terms)
+    if hit and anchor_terms:
+        hit = any(a in text for a in anchor_terms)
+    return hit
 
 
 def is_noise_source(url, source, noise_domains=(), noise_sources=(),
@@ -535,8 +545,19 @@ def print_quality_report(df, stats, title="数据质量"):
     print(f"[{title}]")
     print(f"  语料总数（含历史累积）：{len(df)} 条")
     if stats.get("per_keyword"):
-        print("  本次各关键词：", "，".join(
-            f"{k} {v} 条" for k, v in stats["per_keyword"].items()))
+        # 指标化采集的检索式可能多达几百条（地区 × 指标），全列出来没法看。
+        # 超过 10 条时只报"有收获的"和收获最多的几条。
+        per_kw = stats["per_keyword"]
+        hit = [(k, v) for k, v in per_kw.items() if v]
+        if len(per_kw) > 10:
+            print(f"  本次检索式 {len(per_kw)} 条，其中有收获 {len(hit)} 条")
+            top = sorted(hit, key=lambda kv: -kv[1])[:10]
+            if top:
+                print("  收获最多的检索式：", "，".join(
+                    f"{k} {v} 条" for k, v in top))
+        else:
+            print("  本次各关键词：", "，".join(
+                f"{k} {v} 条" for k, v in per_kw.items()))
 
     if len(df):
         print(f"  日期填充率：{dated}/{len(df)}（{dated / len(df) * 100:.0f}%）")

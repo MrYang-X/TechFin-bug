@@ -223,7 +223,8 @@ _DOC_RE = re.compile(r"《([^》]{4,60})》")
 # 覆盖度对比用的主题词。注意官方源极少用"科技金融"字面词来命名
 # （实测 84 条搜索语料里"科技金融"命中 76 次，而 600 条官方标题里只有 4 次），
 # 故对比时除字面词外还列了几个官方口径常用的近义表述。
-TOPIC_TERMS = ["科技金融", "金融科技", "科创", "科技型中小企业", "科技成果转化"]
+TOPIC_TERMS = ["科技金融", "金融科技", "科创", "科技型中小企业", "科技成果转化",
+               "高新技术企业", "研发经费", "研发投入", "R&D"]
 
 
 def doc_names(df):
@@ -356,6 +357,33 @@ def build_report(search_df, official_df, pairs, only_search, only_official,
         n_os = sum(1 for i in os_set if str(search_df.loc[i, "date"])[:4] == y)
         lines.append(f"| {y} | {n_s} | {n_oa} | {n_o} | {n_both} | {n_os} |")
     lines.append("")
+
+    # 指标 / 地区覆盖（A1 指标化采集新增的列）。旧语料没有这些列、或列全为空时
+    # 整节跳过——那种情况下显示一张空表只会让人误以为"没采到"。
+    if "level3_name" in search_df.columns:
+        sub = search_df[search_df["level3_name"].fillna("").astype(str)
+                        .str.strip().ne("")]
+        if len(sub):
+            lines.append("## 各三级指标覆盖\n")
+            lines.append("| 三级指标 | 条数 | 覆盖县级单元数 |")
+            lines.append("|---|---|---|")
+            for name, n in sub["level3_name"].value_counts().items():
+                regs = None
+                if "region_name" in sub.columns:
+                    r = sub.loc[sub["level3_name"] == name, "region_name"]
+                    regs = r[r.fillna("").astype(str).str.strip().ne("")].nunique()
+                lines.append(f"| {name} | {n} | "
+                             f"{regs if regs is not None else '-'} |")
+            lines.append("")
+            if "region_name" in sub.columns:
+                got = sub["region_name"].fillna("").astype(str).str.strip()
+                got = set(got[got.ne("")])
+                total = len(cfg.guangdong_regions())
+                if total:
+                    lines.append(f"**地区覆盖**：{len(got)}/{total} 个县级单元有语料。"
+                                 "县级新闻语料天然稀疏，大量单元为 0 是数据的客观"
+                                 "状况，不等于采集失败——先看上文日志的源覆盖率"
+                                 "区分二者。\n")
 
     # 语料构成
     lines.append("## 语料构成\n")

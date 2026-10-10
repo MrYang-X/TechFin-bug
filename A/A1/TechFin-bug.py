@@ -330,12 +330,17 @@ SOURCES = {
 }
 
 
-def crawl_all_keywords(keywords, max_pages=3, resolve_url=False,
+def crawl_all_keywords(plans, max_pages=3, resolve_url=False,
                        enabled_sources=None):
     """
     多源采集。返回 (文章列表, 统计信息)。
 
-    按源隔离：某源被限流只跳过该源该关键词，其余源继续——这是多源改造的核心目的。
+    参数 plans 是 topic_config.build_search_plan() 产出的检索计划列表——每个元素
+    是一个 dict（query / level1_code / ... / level3_code / level3_name / unit /
+    region_code / region_name / anchor_terms），而不是裸字符串。这样采到的每一条都能
+    归属到具体的指标和地区上，而不是只知道"被某个词搜到"。
+
+    按源隔离：某源被限流只跳过该源该检索式，其余源继续——这是多源改造的核心目的。
     """
     enabled = enabled_sources or cfg.ENABLED_SOURCES
     session = requests.Session()
@@ -348,6 +353,8 @@ def crawl_all_keywords(keywords, max_pages=3, resolve_url=False,
     stats = {
         "per_keyword": {},
         "per_source": {name: 0 for name in enabled},
+        # 每源成功完成的检索式数 / 总检索式数，用于收尾报告覆盖率
+        "ok_by_source": {name: 0 for name in enabled},
         "engines_merged": 0,
         "noise_dropped": 0,
         "irrelevant_dropped": 0,
@@ -355,25 +362,32 @@ def crawl_all_keywords(keywords, max_pages=3, resolve_url=False,
         "failed_by_source": {},
     }
 
-    total = len(keywords)
-    for idx, kw in enumerate(keywords, 1):
-        print(f"\n[{idx}/{total}] 关键词：{kw}")
+    total = len(plans)
+    for idx, plan in enumerate(plans, 1):
+        kw = plan["query"]
+        where = plan["region_name"] or "（无地区）"
+        print(f"\n[{idx}/{total}] {where} · {plan['level3_name']}")
+        print(f"  检索式：{kw}")
         stats["per_keyword"][kw] = 0
 
         for source_name in enabled:
             fetcher = SOURCES[source_name]
-            print(f"  -- 源：{source_name}")
+            # 每个源翻几页由配置决定：百度吃限流额度，指标检索式只取首屏
+            per_source_pages = cfg.MAX_PAGES_BY_SOURCE.get(source_name, max_pages)
+            print(f"  -- 源：{source_name}（{per_source_pages} 页）")
+            source_failed = False
 
-            for page in range(max_pages):
+            for page in range(per_source_pages):
                 print(f"    第 {page + 1} 页 ...", end=" ")
                 articles = fetcher(kw, page=page, session=session)
 
                 if articles is None:
                     # 该源被限流/失败：只跳过这个源，其它源继续
+                    source_failed = True
                     stats["failed_pages"] += 1
                     stats["failed_by_source"][source_name] = \
                         stats["failed_by_source"].get(source_name, 0) + 1
-                    print(f"[中断] {source_name} 该关键词被限流，跳过；"
+                    print(f"[中断] {source_name} 该检索式被限流，跳过；"
                           f"其它源继续，已采数据保留")
                     break
 
@@ -390,23 +404,41 @@ def crawl_all_keywords(keywords, max_pages=3, resolve_url=False,
                         stats["noise_dropped"] += 1
                         continue
                     if not is_relevant(combined, kw, cfg.CORE_TERMS,
-                                             cfg.QUALIFIER_TERMS):
+                                             cfg.QUALIFIER_TERMS,
+                                             plan.get("anchor_terms", ())):
                         stats["irrelevant_dropped"] += 1
                         continue
 
                     art_id = generate_article_id(art["title"], art["url"])
                     art["article_id"] = art_id
+                    # 指标归属：一篇文章可能同时印证多条指标，用 indicators 累积
+                    tag = f"{plan['level2_code']}:{plan['level3_name']}"
 
                     if art_id in by_id:
-                        # 同一篇被两源同时命中 —— 记录引擎叠加，
+                        # 同一篇被两源/多个检索式命中 —— 记录引擎与指标叠加，
                         # 这本身就是一个免费的双源印证信号
                         existing = by_id[art_id]
                         if art["engine"] not in existing["engines"].split("+"):
                             existing["engines"] += "+" + art["engine"]
                             stats["engines_merged"] += 1
+                        cur = existing.get("indicators", "")
+                        if tag not in cur.split("+"):
+                            existing["indicators"] = (cur + "+" + tag).strip("+")
                         continue
 
                     art["engines"] = art["engine"]
+                    # 指标与地区标识（单值列取"首个命中"的指标，便于简单聚合；
+                    # 全量归属在 indicators 里）
+                    art["level1_code"] = plan["level1_code"]
+                    art["level1_name"] = plan["level1_name"]
+                    art["level2_code"] = plan["level2_code"]
+                    art["level2_name"] = plan["level2_name"]
+                    art["level3_code"] = plan["level3_code"]
+                    art["level3_name"] = plan["level3_name"]
+                    art["unit"] = plan["unit"]
+                    art["region_code"] = plan["region_code"]
+                    art["region_name"] = plan["region_name"]
+                    art["indicators"] = tag
 
                     # 可选：解析真实URL
                     if resolve_url:
@@ -421,6 +453,9 @@ def crawl_all_keywords(keywords, max_pages=3, resolve_url=False,
 
                 print(f"获取 {len(articles)} 条，新增 {new_count} 条")
                 random_delay(cfg.MIN_DELAY, cfg.MAX_DELAY)
+
+            if not source_failed:
+                stats["ok_by_source"][source_name] += 1
 
         if idx < total:
             extra = random.uniform(2.0, 5.0)
@@ -469,18 +504,42 @@ def artifact_paths(run_dir):
     }
 
 
-def run_once(run_dir, paths, accumulator):
+def print_coverage(stats, total_plans):
+    """
+    打印本轮检索式的源覆盖率。
+
+    指标化采集的请求量是"地区 × 指标"，远超百度 6~8 次的限流阈值，单轮必然采不全。
+    关键不是消灭失败，而是让缺口【始终可见】——否则"看着跑完了其实没采全"是最危险的。
+    """
+    print("\n" + "-" * 60)
+    print(f"[覆盖率] 本轮共 {total_plans} 条检索式")
+    for name, ok in (stats.get("ok_by_source") or {}).items():
+        mark = "" if ok >= total_plans else "   ← 有缺口"
+        print(f"  {name}：{ok}/{total_plans}{mark}")
+    if stats.get("failed_pages"):
+        print(f"  采集失败页数：{stats['failed_pages']}"
+              f"（{stats.get('failed_by_source')}）")
+        print("  [提示] 百度按 IP 限流，单轮采不全属正常。隔 10 分钟再跑一次即可，"
+              "结果会合并进累积总库（不覆盖）；也可用 --offset/--limit/--cities 分批推进。")
+    print("-" * 60)
+
+
+def run_once(run_dir, paths, accumulator, plans, enabled_sources=None):
     print("=" * 60)
-    print(f"{cfg.TOPIC_LABEL} · 新闻采集（多源：百度资讯 + 360新闻）")
+    print(f"{cfg.TOPIC_LABEL} · 指标化新闻采集")
     print("=" * 60)
-    print(f"启用源：{', '.join(cfg.ENABLED_SOURCES)}")
+    print(f"启用源：{', '.join(enabled_sources or cfg.ENABLED_SOURCES)}")
+    print(f"检索式：{len(plans)} 条")
     print(f"产物目录：{run_dir}")
 
     raw, stats = crawl_all_keywords(
-        cfg.TECH_FIN_KEYWORDS,
+        plans,
         max_pages=cfg.MAX_PAGES_PER_KEYWORD,
         resolve_url=RESOLVE_REAL_URL,
+        enabled_sources=enabled_sources,
     )
+
+    print_coverage(stats, len(plans))
 
     if not raw:
         print("\n[结果] 未采集到任何文章。")
@@ -535,16 +594,55 @@ def run_once(run_dir, paths, accumulator):
 
 def parse_args(argv=None):
     ap = argparse.ArgumentParser(
-        description=f"{cfg.TOPIC_LABEL} · 搜索引擎语料采集（百度 + 360）")
+        description=f"{cfg.TOPIC_LABEL} · 指标化搜索引擎语料采集")
     ap.add_argument("--output-dir",
                     help="输出根目录（覆盖 topic_config.OUTPUT_ROOT）。"
                          "相对路径锚定到本脚本所在目录，也可写绝对路径把"
                          "数据放到仓库外")
+    ap.add_argument("--level2", nargs="*", default=["A1"],
+                    help="只采指定二级指标，如 --level2 A1 A2（默认 A1）")
+    ap.add_argument("--cities", nargs="*", default=None,
+                    help="只采广东省内的指定地级市，如 --cities 广州市 深圳市"
+                         "（默认全省 124 个县级单元）")
+    ap.add_argument("--no-region", action="store_true",
+                    help="不带地区前缀采集（每个指标用全部展开检索式）")
+    ap.add_argument("--sources", nargs="*", default=None,
+                    help="只启用指定源，如 --sources 360（默认两个都开）")
+    ap.add_argument("--offset", type=int, default=0,
+                    help="检索计划切片起点，用于分批绕开百度限流")
+    ap.add_argument("--limit", type=int, default=None,
+                    help="本轮最多采前 N 条检索式")
+    ap.add_argument("--list-plan", action="store_true",
+                    help="只打印检索计划，不采集、不建目录（零请求，先核对）")
     return ap.parse_args(argv)
+
+
+def build_plans(args):
+    """按命令行参数生成检索计划（地区为外层、指标为内层）。"""
+    regions = [] if args.no_region else cfg.guangdong_regions(cities=args.cities)
+    return cfg.build_search_plan(
+        level2_codes=args.level2,
+        regions=regions,
+        offset=args.offset,
+        limit=args.limit,
+    )
 
 
 def main(argv=None):
     args = parse_args(argv)
+    plans = build_plans(args)
+
+    if args.list_plan:
+        # 零请求核对：先看清要打哪些检索式，再决定怎么分批
+        print(f"检索计划：{len(plans)} 条")
+        for i, p in enumerate(plans, 1):
+            print(f"{i:>4}. [{p['region_name'] or '无地区'}] {p['level3_name']}"
+                  f"  →  {p['query']}")
+        return
+
+    if not plans:
+        print("[中止] 检索计划为空，请检查 --level2 / --cities 参数。")
+        return
 
     # 一切路径锚定到脚本自身位置，不依赖当前工作目录——
     # 这样从任何地方执行，产物都稳定落在本主题的输出根下。
@@ -557,7 +655,8 @@ def main(argv=None):
     try:
         with run_logging(paths["log"]):
             print(f"输出根目录：{out_root}")
-            run_once(run_dir, paths, accumulator)
+            run_once(run_dir, paths, accumulator, plans,
+                     enabled_sources=args.sources)
     finally:
         # 此处 stdout 已恢复，只作提示不写入日志；崩溃时尤其需要知道存到哪了
         print(f"[归档] 本轮产物目录：{run_dir}")
