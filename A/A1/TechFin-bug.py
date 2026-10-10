@@ -1,16 +1,22 @@
 """
-科技金融指数研究 - 新闻采集（多源：百度资讯 + 360新闻）与数据清洗
+科技金融指数研究 - 新闻采集（多源：百度资讯 + Bing网页搜索 + 360新闻）与数据清洗
 
 依赖：pip install requests beautifulsoup4 pandas
 通用工具见仓库根 crawler_common.py；本主题配置见同目录 topic_config.py；
 依赖关系与用法见同目录 README.md。
 
-关于两个源的定位（实测结论，勿删）：
-  - 百度资讯：唯一同时具备【历史深度 + 绝对日期】的源（实测语料跨 2018-2026），
-    但按 IP 限流，连续 6~8 次快速请求后会返回"百度安全验证"页。
-  - 360 新闻：连打 5/5 页无任何限流，链接即真实 URL；但日期只有相对值
-    且饱和在"1天前"，深翻 41 页结果全部落在 1 天内。
-    => 它只能补充近期增量与来源覆盖，【不能提供历史深度】。
+关于各源的定位（实测结论，勿删）：
+  - 百度资讯：唯一做【严格 AND】的源（"荔湾区 高新技术企业"10 条里 8 条两词兼有），
+    且有绝对日期（语料跨 2018-2026）。按 IP 限流（IP 级、粘滞，同 IP 下 www/news/m
+    各站返回同一张验证页）。关键实测：间隔 ≥20s 可持续采集（连打 13+ 次全成功），
+    1s 连打几次即被封——放慢节奏是唯一有效手段。
+  - Bing 网页搜索 cn.bing.com/search：不限流（连打 12 次全 200），但只做松散匹配：
+    县级检索式 10 条里地区词命中 8、指标词命中 0，经 is_relevant 全被过滤（0%）。
+    仅无地区检索式约 1% 可用。=> 不能替代百度做县级，仅作补充。
+  - 360 新闻：不限流、有日期，但同样松散（县级近乎 0，无地区约 4%），仅作补充。
+
+结论：县级指标采集本质只能靠百度，靠"放慢节奏 + 多轮累积 + 断点续跑"补齐。
+按源隔离是核心：某源被限流只跳过该源，其余源继续（见 topic_config.BACKOFF_BY_SOURCE）。
 """
 
 import argparse
@@ -20,7 +26,7 @@ import re
 import sys
 import time
 from pathlib import Path
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 
 import pandas as pd
 import requests
@@ -45,6 +51,7 @@ if _HERE not in sys.path:
 
 import topic_config as cfg  # noqa: E402  （须在 sys.path 引导之后导入）
 from crawler_common import (  # noqa: E402
+    append_progress,
     blocking_reason,
     clean_dataframe,
     clean_text,
@@ -55,6 +62,7 @@ from crawler_common import (  # noqa: E402
     get_random_headers,
     is_noise_source,
     is_relevant,
+    load_progress,
     looks_like_date,
     make_article,
     merge_with_existing,
@@ -69,15 +77,12 @@ from crawler_common import (  # noqa: E402
 # ==================== 配置区 ====================
 # 主题相关配置全部来自 topic_config.py（关键词、噪声源、采集范围、产物契约）
 
-# 被"安全验证"限流后的退避等待（秒），逐级加长
-THROTTLE_BACKOFF = [60, 120]
-MAX_RETRIES_PER_PAGE = len(THROTTLE_BACKOFF)
-# 单次运行的退避总次数上限：限流往往是 IP 级的，同一轮里反复退避既无效
-# 又耗时。用尽后直接放弃剩余页，改为"隔一段时间重跑累积"。
-MAX_TOTAL_BACKOFFS = 2
+# 源规范键 → 显示名（日志用）。fetch_with_backoff 用规范键隔离退避状态。
+SOURCE_LABEL = {"baidu": "百度", "bing": "Bing", "360": "360"}
 
-# 本次运行的退避计数
-_THROTTLE = {"used": 0}
+# 按源隔离的退避状态：source -> {"used": 已退避次数, "tripped": 本轮是否已跳闸}。
+# 某源跳闸只停用该源，其它源继续（多源改造的核心）。
+_SOURCE_THROTTLE = {}
 
 # 是否解析跳转链接为真实URL（会增加请求量，谨慎开启）
 # 注：实测百度资讯与 360 返回的通常已是真实URL，无需开启。
@@ -85,45 +90,57 @@ RESOLVE_REAL_URL = False
 RESOLVE_DELAY = 0.8
 
 
-# ==================== 请求（含限流退避） ====================
+def _throttle_state(source):
+    """取（必要时初始化）某源的退避状态。"""
+    return _SOURCE_THROTTLE.setdefault(source, {"used": 0, "tripped": False})
 
-def fetch_with_backoff(url, session, referer, tag):
+
+# ==================== 请求（含按源隔离的限流退避） ====================
+
+def fetch_with_backoff(url, session, referer, source):
     """
-    发起请求并统一处理限流退避。
+    发起请求并统一处理限流退避。退避状态与额度【按源隔离】。
 
-    返回 requests.Response；被拦截/网络异常/放弃时返回 None。
+    source 用规范键（"baidu"/"bing"/"360"），退避参数取自
+    topic_config.BACKOFF_BY_SOURCE。返回 requests.Response；
+    被拦截 / 网络异常 / 该源跳闸时返回 None。
     None 表示"这次没拿到，且原因不是没结果"——调用方据此区分处理，
     避免把限流伪装成"无结果"（这正是原版的静默失败之处）。
     """
-    for attempt in range(MAX_RETRIES_PER_PAGE + 1):
+    params = cfg.BACKOFF_BY_SOURCE.get(source, cfg.BACKOFF_DEFAULT)
+    waits, max_total = params["backoff"], params["max_total"]
+    state = _throttle_state(source)
+    label = SOURCE_LABEL.get(source, source)
+
+    for attempt in range(len(waits) + 1):
         try:
             resp = session.get(url, headers=get_random_headers(referer=referer),
                                timeout=15)
         except requests.RequestException as e:
-            print(f"  [异常] {tag} 请求失败：{e}")
+            print(f"  [异常] {label} 请求失败：{e}")
             return None
 
         resp.encoding = "utf-8"
         if resp.status_code != 200:
-            print(f"  [警告] {tag} 状态码 {resp.status_code}")
+            print(f"  [警告] {label} 状态码 {resp.status_code}")
             return None
 
         reason = blocking_reason(resp)
         if not reason:
             return resp
 
-        print(f"  [警告] {tag} {reason}（第 {attempt + 1}/{MAX_RETRIES_PER_PAGE + 1} 次）")
+        print(f"  [警告] {label} {reason}（第 {attempt + 1}/{len(waits) + 1} 次）")
 
-        if _THROTTLE["used"] >= MAX_TOTAL_BACKOFFS:
-            print(f"  [放弃] {tag} 本次运行退避额度已用尽，放弃该页"
-                  "（限流通常是 IP 级的，反复重试无效）")
+        if state["used"] >= max_total:
+            state["tripped"] = True
+            print(f"  [跳闸] {label} 本轮退避额度已用尽，停用该源（其它源继续）")
             return None
 
-        if attempt < MAX_RETRIES_PER_PAGE:
-            wait = THROTTLE_BACKOFF[min(attempt, len(THROTTLE_BACKOFF) - 1)]
-            _THROTTLE["used"] += 1
-            print(f"  [退避] 等待 {wait}s 后重试"
-                  f"（本次已退避 {_THROTTLE['used']}/{MAX_TOTAL_BACKOFFS} 次）...")
+        if attempt < len(waits):
+            wait = waits[min(attempt, len(waits) - 1)]
+            state["used"] += 1
+            print(f"  [退避] {label} 等待 {wait}s 后重试"
+                  f"（{label} 本次已退避 {state['used']}/{max_total} 次）...")
             time.sleep(wait)
 
     return None
@@ -233,7 +250,7 @@ def fetch_baidu_news_page(keyword, page=0, session=None):
     url = "https://www.baidu.com/s?" + "&".join(
         f"{k}={quote(str(v))}" for k, v in params.items())
 
-    resp = fetch_with_backoff(url, session, "https://news.baidu.com/", "百度")
+    resp = fetch_with_backoff(url, session, "https://news.baidu.com/", "baidu")
     if resp is None:
         return None
 
@@ -322,29 +339,108 @@ def fetch_360_news_page(keyword, page=0, session=None):
     return articles
 
 
+# ==================== 源3：Bing 网页搜索 ====================
+
+# Bing 摘要里内嵌的日期（绝对日期形如 2026-09-22 / 2026年9月22日）
+_BING_DATE_RE = re.compile(
+    r"(?:19|20)\d{2}[-/.]\d{1,2}[-/.]\d{1,2}|\d{4}年\d{1,2}月\d{1,2}日")
+
+
+def extract_bing_item(item):
+    """
+    从 Bing 结果块 li.b_algo 抽取字段。返回 (title, url, summary, source, date_raw)。
+
+    - 标题/直链：h2 > a[href]（真实直链，非跳转）
+    - 摘要：.b_caption（日期内嵌其中）
+    - 来源：cite 的展示域名（形如 "www.gz.gov.cn › ..."，取 › 之前）
+    """
+    h2 = item.select_one("h2")
+    a = h2.select_one("a[href]") if h2 else None
+    url = normalize_url(a.get("href", "")) if a else ""
+    title = clean_text(h2.get_text(" ")) if h2 else ""
+
+    cap = item.select_one(".b_caption")
+    cap_text = clean_text(cap.get_text(" ")) if cap else ""
+    m = _BING_DATE_RE.search(cap_text)
+    date_raw = m.group(0) if m else ""
+    # 摘要去掉开头的"时间 · 日期 —"前缀，保留正文
+    summary = re.sub(r"^.*?—\s*", "", cap_text) if "—" in cap_text[:40] else cap_text
+
+    cite = item.select_one("cite")
+    if cite:
+        source = clean_text(cite.get_text(" ")).split("›")[0].strip()
+    else:
+        source = urlparse(url).netloc
+    return title, url, summary, source, date_raw
+
+
+def fetch_bing_web_page(keyword, page=0, session=None):
+    """
+    Bing 网页搜索（cn.bing.com/search）。返回结果列表；被拦截返回 None。
+
+    注意：Bing【新闻】垂直（news/search、?format=RSS）已失效，只有网页搜索可用；
+    网页结果日期稀疏（约 1~2/10 有条目日期）。分页参数 first 从 1 开始
+    （第 n 页 first = page*10 + 1）。
+    """
+    if session is None:
+        session = requests.Session()
+
+    params = {"q": keyword, "first": page * 10 + 1}
+    url = "https://cn.bing.com/search?" + "&".join(
+        f"{k}={quote(str(v))}" for k, v in params.items())
+
+    resp = fetch_with_backoff(url, session, "https://cn.bing.com/", "bing")
+    if resp is None:
+        return None
+
+    soup = BeautifulSoup(resp.text, "html.parser")
+    results = soup.select("li.b_algo")
+    if not results:
+        print(f"  [警告] Bing 页面正常但未匹配到结果节点（可能改版），"
+              f"正文 {len(resp.text)} 字符")
+        return []
+
+    articles = []
+    for item in results:
+        title, link, summary, source, date_raw = extract_bing_item(item)
+        if title and link:
+            articles.append(make_article(title, link, summary, source, date_raw,
+                                          keyword, "bing"))
+    return articles
+
+
 # ==================== 采集主循环 ====================
 
 SOURCES = {
     "baidu": fetch_baidu_news_page,
+    "bing": fetch_bing_web_page,
     "360": fetch_360_news_page,
 }
 
 
 def crawl_all_keywords(plans, max_pages=3, resolve_url=False,
-                       enabled_sources=None):
+                       enabled_sources=None, progress_path=None, fresh=False):
     """
     多源采集。返回 (文章列表, 统计信息)。
 
     参数 plans 是 topic_config.build_search_plan() 产出的检索计划列表——每个元素
     是一个 dict（query / level1_code / ... / level3_code / level3_name / unit /
-    region_code / region_name / anchor_terms），而不是裸字符串。这样采到的每一条都能
-    归属到具体的指标和地区上，而不是只知道"被某个词搜到"。
+    region_code / region_name / anchor_terms / region_aliases），而不是裸字符串。
+    这样采到的每一条都能归属到具体的指标和地区上，而不是只知道"被某个词搜到"。
 
-    按源隔离：某源被限流只跳过该源该检索式，其余源继续——这是多源改造的核心目的。
+    源按检索式粒度选择（cfg.SOURCES_BY_REGION_LEVEL）：带地区=county，反之 none。
+    按源隔离：某源被限流只跳过该源该检索式（额度用尽则跳闸停用该源），其余源继续——
+    这是多源改造的核心目的。
+
+    progress_path 非空且 fresh=False 时，跳过台账里已成功的 (源, 检索式) 并边采边
+    落盘，让重跑只补缺口（省下最稀缺的百度额度）。
     """
     enabled = enabled_sources or cfg.ENABLED_SOURCES
     session = requests.Session()
-    _THROTTLE["used"] = 0
+    _SOURCE_THROTTLE.clear()
+    done = set()
+    if progress_path and not fresh:
+        done = load_progress(progress_path)
 
     if "baidu" in enabled:
         warm_up_session(session)
@@ -353,29 +449,65 @@ def crawl_all_keywords(plans, max_pages=3, resolve_url=False,
     stats = {
         "per_keyword": {},
         "per_source": {name: 0 for name in enabled},
-        # 每源成功完成的检索式数 / 总检索式数，用于收尾报告覆盖率
+        # 覆盖率口径：分母是"该源被路由到的检索式数"（非总检索式数），
+        # 否则只走百度的县级检索式会被误报成"bing/360 有缺口"。
+        "plans_by_source": {name: 0 for name in enabled},
         "ok_by_source": {name: 0 for name in enabled},
+        "skipped_by_source": {name: 0 for name in enabled},
         "engines_merged": 0,
         "noise_dropped": 0,
         "irrelevant_dropped": 0,
         "failed_pages": 0,
         "failed_by_source": {},
+        "resumed_skipped": 0,
     }
 
     total = len(plans)
+    idle_noted = False
     for idx, plan in enumerate(plans, 1):
         kw = plan["query"]
+        stats["per_keyword"][kw] = 0
+
+        # 按检索式粒度选源：带地区 = county，不带 = none
+        level = "county" if plan.get("region_code") else "none"
+        allowed = cfg.SOURCES_BY_REGION_LEVEL.get(level, tuple(enabled))
+        plan_sources = [s for s in enabled if s in allowed]
+        for s in plan_sources:
+            stats["plans_by_source"][s] += 1
+        # 断点续跑键：确定性、跨轮稳定
+        plan_key = (f"{plan.get('region_code', '')}"
+                    f"|{plan.get('level3_code', '')}|{kw}")
+
+        # 该检索式的所有路由源都已跳闸 → 不做请求、也不空等，直接看下一条。
+        # 否则某源跳闸后，剩余上千条检索式会以 3~5s 的间隔空跑一遍，纯浪费（实测踩过）。
+        active = [s for s in plan_sources if not _throttle_state(s)["tripped"]]
+        if not active:
+            if plan_sources and not idle_noted:
+                print(f"\n[跳过] 从第 {idx} 条起，其全部源均已跳闸，"
+                      f"后续检索式不再请求、也不再空等，本轮到此基本结束。")
+                idle_noted = True
+            continue
+
         where = plan["region_name"] or "（无地区）"
         print(f"\n[{idx}/{total}] {where} · {plan['level3_name']}")
         print(f"  检索式：{kw}")
-        stats["per_keyword"][kw] = 0
 
-        for source_name in enabled:
+        for source_name in active:
+            label = SOURCE_LABEL.get(source_name, source_name)
+            if progress_path and (source_name, plan_key) in done:
+                stats["resumed_skipped"] += 1
+                stats["skipped_by_source"][source_name] += 1
+                print(f"  -- 源：{label} [续跑] 该检索式已采过，跳过")
+                continue
+
             fetcher = SOURCES[source_name]
             # 每个源翻几页由配置决定：百度吃限流额度，指标检索式只取首屏
             per_source_pages = cfg.MAX_PAGES_BY_SOURCE.get(source_name, max_pages)
-            print(f"  -- 源：{source_name}（{per_source_pages} 页）")
+            print(f"  -- 源：{label}（{per_source_pages} 页）")
             source_failed = False
+            # 松散匹配源需补偿过滤：结果须命中地区别名之一（无地区时自动失效）
+            required = (plan.get("region_aliases", ())
+                        if source_name in cfg.LOOSE_SOURCES else ())
 
             for page in range(per_source_pages):
                 print(f"    第 {page + 1} 页 ...", end=" ")
@@ -387,7 +519,7 @@ def crawl_all_keywords(plans, max_pages=3, resolve_url=False,
                     stats["failed_pages"] += 1
                     stats["failed_by_source"][source_name] = \
                         stats["failed_by_source"].get(source_name, 0) + 1
-                    print(f"[中断] {source_name} 该检索式被限流，跳过；"
+                    print(f"[中断] {label} 该检索式被限流，跳过；"
                           f"其它源继续，已采数据保留")
                     break
 
@@ -405,7 +537,8 @@ def crawl_all_keywords(plans, max_pages=3, resolve_url=False,
                         continue
                     if not is_relevant(combined, kw, cfg.CORE_TERMS,
                                              cfg.QUALIFIER_TERMS,
-                                             plan.get("anchor_terms", ())):
+                                             plan.get("anchor_terms", ()),
+                                             required_terms=required):
                         stats["irrelevant_dropped"] += 1
                         continue
 
@@ -452,10 +585,18 @@ def crawl_all_keywords(plans, max_pages=3, resolve_url=False,
                     stats["per_source"][source_name] += 1
 
                 print(f"获取 {len(articles)} 条，新增 {new_count} 条")
-                random_delay(cfg.MIN_DELAY, cfg.MAX_DELAY)
+                # 每页间隔按源给定：只有会被限流的源才需要长间隔
+                dmin, dmax = cfg.DELAY_BY_SOURCE.get(source_name,
+                                                     cfg.DELAY_DEFAULT)
+                random_delay(dmin, dmax)
 
             if not source_failed:
                 stats["ok_by_source"][source_name] += 1
+                # 该源该检索式成功采完 → 边采边记入台账（崩溃/中断也不丢）
+                if progress_path:
+                    append_progress(progress_path, [(
+                        source_name, plan_key, "ok",
+                        time.strftime("%Y-%m-%d %H:%M:%S"))])
 
         if idx < total:
             extra = random.uniform(2.0, 5.0)
@@ -508,35 +649,49 @@ def print_coverage(stats, total_plans):
     """
     打印本轮检索式的源覆盖率。
 
-    指标化采集的请求量是"地区 × 指标"，远超百度 6~8 次的限流阈值，单轮必然采不全。
+    指标化采集的请求量是"地区 × 指标"，远超百度 20s 间隔下能跑完的额度，单轮必然采不全。
     关键不是消灭失败，而是让缺口【始终可见】——否则"看着跑完了其实没采全"是最危险的。
+    分母是"该源被路由到的检索式数"（按粒度选源），而非总检索式数。
     """
     print("\n" + "-" * 60)
     print(f"[覆盖率] 本轮共 {total_plans} 条检索式")
-    for name, ok in (stats.get("ok_by_source") or {}).items():
-        mark = "" if ok >= total_plans else "   ← 有缺口"
-        print(f"  {name}：{ok}/{total_plans}{mark}")
+    routed = stats.get("plans_by_source") or {}
+    for name, routed_n in routed.items():
+        if not routed_n:
+            continue        # 该源本轮未被路由到任何检索式（按粒度选源），不报缺口
+        done = (stats.get("ok_by_source", {}).get(name, 0)
+                + stats.get("skipped_by_source", {}).get(name, 0))
+        mark = "" if done >= routed_n else "   ← 有缺口"
+        print(f"  {name}：{done}/{routed_n} 条已路由{mark}")
+    if stats.get("resumed_skipped"):
+        print(f"  （其中 {stats['resumed_skipped']} 次因续跑台账已采而跳过）")
     if stats.get("failed_pages"):
         print(f"  采集失败页数：{stats['failed_pages']}"
               f"（{stats.get('failed_by_source')}）")
-        print("  [提示] 百度按 IP 限流，单轮采不全属正常。隔 10 分钟再跑一次即可，"
-              "结果会合并进累积总库（不覆盖）；也可用 --offset/--limit/--cities 分批推进。")
+        print("  [提示] 百度按 IP 限流。若频繁触发，请调大 topic_config.MIN_DELAY"
+              "（实测间隔 ≥20s 可持续采集）；已采成功的检索式会记入续跑台账，"
+              "重跑只补缺口（--fresh 可忽略台账全量重采）。")
     print("-" * 60)
 
 
-def run_once(run_dir, paths, accumulator, plans, enabled_sources=None):
+def run_once(run_dir, paths, accumulator, plans, enabled_sources=None,
+             progress_path=None, fresh=False):
     print("=" * 60)
     print(f"{cfg.TOPIC_LABEL} · 指标化新闻采集")
     print("=" * 60)
     print(f"启用源：{', '.join(enabled_sources or cfg.ENABLED_SOURCES)}")
     print(f"检索式：{len(plans)} 条")
     print(f"产物目录：{run_dir}")
+    if progress_path and not fresh:
+        print(f"续跑台账：{progress_path}（已成功的检索式将跳过；--fresh 可忽略）")
 
     raw, stats = crawl_all_keywords(
         plans,
         max_pages=cfg.MAX_PAGES_PER_KEYWORD,
         resolve_url=RESOLVE_REAL_URL,
         enabled_sources=enabled_sources,
+        progress_path=progress_path,
+        fresh=fresh,
     )
 
     print_coverage(stats, len(plans))
@@ -607,11 +762,13 @@ def parse_args(argv=None):
     ap.add_argument("--no-region", action="store_true",
                     help="不带地区前缀采集（每个指标用全部展开检索式）")
     ap.add_argument("--sources", nargs="*", default=None,
-                    help="只启用指定源，如 --sources 360（默认两个都开）")
+                    help="只启用指定源，如 --sources bing（默认 baidu+bing+360 全开）")
     ap.add_argument("--offset", type=int, default=0,
                     help="检索计划切片起点，用于分批绕开百度限流")
     ap.add_argument("--limit", type=int, default=None,
                     help="本轮最多采前 N 条检索式")
+    ap.add_argument("--fresh", action="store_true",
+                    help="忽略续跑台账、全量重采（默认跳过台账里已成功的检索式）")
     ap.add_argument("--list-plan", action="store_true",
                     help="只打印检索计划，不采集、不建目录（零请求，先核对）")
     return ap.parse_args(argv)
@@ -633,11 +790,13 @@ def main(argv=None):
     plans = build_plans(args)
 
     if args.list_plan:
-        # 零请求核对：先看清要打哪些检索式，再决定怎么分批
+        # 零请求核对：先看清要打哪些检索式、各走哪些源，再决定怎么分批
         print(f"检索计划：{len(plans)} 条")
         for i, p in enumerate(plans, 1):
-            print(f"{i:>4}. [{p['region_name'] or '无地区'}] {p['level3_name']}"
-                  f"  →  {p['query']}")
+            level = "county" if p.get("region_code") else "none"
+            srcs = "+".join(cfg.SOURCES_BY_REGION_LEVEL.get(level, ()))
+            print(f"{i:>4}. [{p['region_name'] or '无地区'}·{level}→{srcs}]"
+                  f" {p['level3_name']}  →  {p['query']}")
         return
 
     if not plans:
@@ -649,6 +808,7 @@ def main(argv=None):
     topic_dir = Path(__file__).resolve().parent
     out_root = resolve_output_root(topic_dir, cfg.OUTPUT_ROOT, args.output_dir)
     accumulator = out_root / cfg.SEARCH_ACCUMULATOR
+    progress_path = out_root / cfg.SEARCH_PROGRESS
 
     run_dir = resolve_run_dir(out_root)
     paths = artifact_paths(run_dir)
@@ -656,7 +816,8 @@ def main(argv=None):
         with run_logging(paths["log"]):
             print(f"输出根目录：{out_root}")
             run_once(run_dir, paths, accumulator, plans,
-                     enabled_sources=args.sources)
+                     enabled_sources=args.sources,
+                     progress_path=progress_path, fresh=args.fresh)
     finally:
         # 此处 stdout 已恢复，只作提示不写入日志；崩溃时尤其需要知道存到哪了
         print(f"[归档] 本轮产物目录：{run_dir}")

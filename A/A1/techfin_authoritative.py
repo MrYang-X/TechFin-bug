@@ -12,11 +12,11 @@
 范围与取舍（实测决定，勿删）：
   * 只抓【列表页元数据】（标题/日期/链接），不进正文——请求量小、跑得快。
   * 链接完整保留（url 列 + official_links.txt），便于人工点开核对原文。
-  * 三个源均已实测可翻页至历史年份：
-        pbc  人民银行  11040-N.html      实测第 20 页 → 2025-10
-        most 科技部    index_N.html      约 20 条/页
-        ndrc 发改委    index_N.html      共 40 页（createPageHTML(40,...)）
+  * 源清单见 topic_config.SOURCES。2026-10 已把源换成"真正发布指标内容"的栏目
+    （广东省科技厅·通知公告/政策文件 + 科技部·通知通告）；原人行/发改委/科技部工作动态
+    指向的是新闻/发布会栏目，标题里没有一条含 A1 指标词，命中 0（原因见那里的注释）。
   * 默认【保存全部条目】而非按关键词过滤，原因见 topic_config.SAVE_ALL_ITEMS。
+    打标词 AUTH_KEYWORDS 由 INDEX_KEYWORDS 派生（见 topic_config），故随检索词自动同步。
 
 未采用/已排除的源（都实测过，别再重复踩）：
   * 证监会 csrc.gov.cn —— 可抓的两个栏目都已停更（c100028 停在 2021-12，
@@ -94,7 +94,7 @@ def parse_list_rows(html, base_url):
     三个站的 HTML 结构差异很大（table / ul / div 混用），但共同点是：
     【标题链接与它的日期在同一个行容器内】。故用"取链接最近的祖先容器，
     在其中找日期"这一通用启发式，避免逐站写选择器——实测对
-    pbc / most / csrc 均能稳定命中。
+    gdstc / most 等均能稳定命中。
     """
     soup = BeautifulSoup(html, "html.parser")
     rows = []

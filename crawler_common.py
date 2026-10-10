@@ -204,7 +204,8 @@ def clean_text(text):
     return text
 
 
-def is_relevant(text, keyword, core_terms, qualifier_terms=(), anchor_terms=()):
+def is_relevant(text, keyword, core_terms, qualifier_terms=(),
+                anchor_terms=(), required_terms=()):
     """
     判断一条结果是否与当前检索词相关。检索词由主题配置传入，本模块不认识任何
     具体词——所以它对主题无感，新增主题只需改配置。
@@ -219,6 +220,10 @@ def is_relevant(text, keyword, core_terms, qualifier_terms=(), anchor_terms=()):
     - 锚点（anchor_terms）：非空时，命中后还须与任一锚点共现。供"指标检索式"用
       ——指标词（如"高新技术企业"）过于泛化，要求与主题锚点共现才算数。
       默认空元组 = 不做此约束，旧的调用方行为完全不变。
+    - 必需词（required_terms）：非空时，命中后还须命中其中任一词。供"松散匹配的
+      源"补齐约束——如 360 对"荔湾区 高新技术企业"只做松散匹配，返回条目的
+      标题/摘要里可能没有"荔湾区"，若不剔除就会把外区噪声当成本区结果入库。
+      默认空元组 = 不做此约束。
     """
     if not text:
         return False
@@ -228,6 +233,8 @@ def is_relevant(text, keyword, core_terms, qualifier_terms=(), anchor_terms=()):
         hit = any(c in text for c in core_terms)
     if hit and anchor_terms:
         hit = any(a in text for a in anchor_terms)
+    if hit and required_terms:
+        hit = any(t in text for t in required_terms)
     return hit
 
 
@@ -370,21 +377,47 @@ def date_from_url(url):
 
 # ==================== 反爬拦截识别 ====================
 
+# 硬特征：出现即判定被拦截（正常结果页几乎不会含这些整串）。
+# 各源反爬页常以 HTTP 200 伪装成功（搜狗第 2 次请求即 200 + antispider 跳转页），
+# 故识别【只看内容特征、不看状态码】——否则会被当作"真没结果"静默丢弃。
+_HARD_BLOCK_MARKERS = (
+    "百度安全验证", "安全验证", "wappass",                  # 百度
+    "请输入验证码", "请输入以下验证码",                     # 百度/通用
+    "antispider", "Redirecting to",                        # 搜狗（200 + 跳转验证页）
+    "访问过于频繁", "请求过于频繁", "人机验证", "滑动验证",  # 360/通用
+)
+# 软特征：仅当页面很短时才判定。验证页多为几百字节~几 KB，正常结果页远大于此；
+# 加长度闸门是为避免误杀正文里恰好含"验证码"三字的正常新闻。
+_SOFT_BLOCK_MARKERS = ("验证码", "verify", "captcha", "安全检测",
+                       "异常请求", "请稍后重试")
+_SMALL_PAGE_CHARS = 3000
+
+
 def blocking_reason(resp):
     """
     判断响应是否被反爬拦截或解码异常，返回原因字符串（正常则返回 ""）。
 
-    正常结果页含 <html 与结果节点；百度被限流时会返回
-    `<title>百度安全验证</title>` 页面；未安装 brotli 而声明了 br 时
-    resp.text 会是二进制乱码。
+    正常结果页含 <html 与结果节点；被拦截时各源均返回验证/跳转页，
+    且常以 HTTP 200 伪装成功。这里只看内容特征，分两档：
+      - 硬特征命中即拦（百度"安全验证"、搜狗"antispider"、360"访问过于频繁"等）。
+      - 软特征仅在"短页面 + 验证词"时拦，避免误杀正常新闻。
+    另外：未安装 brotli 而声明了 br 时，resp.text 会是二进制乱码，一并识别。
     这是为了把"被拦截"和"真的没结果"区分开——否则会静默返回空。
+    本模块主题无关，只做纯文本特征，不含任何站点选择器。
     """
     body = resp.text or ""
-    if "安全验证" in body or "百度安全验证" in body:
-        return "触发安全验证（IP 被限流）"
-    if "wappass" in body or "请输入验证码" in body:
-        return "需要验证码校验"
-    if body and "<html" not in body.lower():
+    if not body:
+        return ""
+    for marker in _HARD_BLOCK_MARKERS:
+        if marker in body:
+            return f"触发反爬验证（命中特征：{marker}）"
+    if len(body) < _SMALL_PAGE_CHARS:
+        m = re.search(r"<title[^>]*>(.*?)</title>", body, re.I | re.S)
+        title = m.group(1).strip() if m else ""
+        for marker in _SOFT_BLOCK_MARKERS:
+            if marker in body or marker in title:
+                return f"疑似验证页（短页面 + 特征：{marker}）"
+    if "<html" not in body.lower():
         return "响应体非HTML，疑似编码解码失败"
     return ""
 
@@ -496,6 +529,41 @@ def csv_row_count(path):
         return len(pd.read_csv(path, dtype=str, encoding="utf-8-sig"))
     except Exception:
         return 0
+
+
+# ==================== 断点续跑台账 ====================
+
+def load_progress(path):
+    """
+    读取"已完成检索式"台账，返回 {(source, plan_key)} 集合；文件不存在返回空集。
+
+    搜索引擎（尤其百度）按 IP 限流、单轮采不全，需要多轮重跑补齐。若不记录
+    哪些检索式已采成功，每轮会把已完成的再打一遍——偏偏百度额度最稀缺，这种
+    重打是纯浪费。台账让重跑只补缺口。
+    """
+    if not os.path.exists(path):
+        return set()
+    try:
+        df = pd.read_csv(path, dtype=str, encoding="utf-8-sig").fillna("")
+    except Exception:
+        return set()
+    if not {"source", "plan_key"}.issubset(df.columns):
+        return set()
+    return set(zip(df["source"], df["plan_key"]))
+
+
+def append_progress(path, rows):
+    """
+    追加若干 (source, plan_key, status, ts) 到台账（不存在则建表头）。
+
+    逐批落盘而非收尾统一写：某源中途被限流、整轮被 Ctrl-C 时，已完成的记录
+    不会丢——这正是断点续跑最需要的性质。
+    """
+    if not rows:
+        return
+    header = not os.path.exists(path)
+    df = pd.DataFrame(rows, columns=["source", "plan_key", "status", "ts"])
+    df.to_csv(path, mode="a", header=header, index=False, encoding="utf-8-sig")
 
 
 def merge_with_existing(df, path, accumulate=True):

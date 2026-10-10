@@ -4,8 +4,8 @@
 把两份语料放在一起比对，回答"搜索引擎语料在各时间段是否覆盖充分、有无系统性遗漏"。
 
 语料来源：默认在本主题的**输出根目录**下自动取最新一轮运行目录里的累积快照
-    <OUT_ROOT>/<日期-次数>/search_cumulative.csv    搜索引擎语料（百度 + 360）
-    <OUT_ROOT>/<日期-次数>/official_cumulative.csv  官方政策源语料（人行/科技部/发改委）
+    <OUT_ROOT>/<日期-次数>/search_cumulative.csv    搜索引擎语料（百度 + Bing + 360）
+    <OUT_ROOT>/<日期-次数>/official_cumulative.csv  官方源语料（广东科技厅/科技部）
 若一个运行目录都没有，则回退读输出根目录下的累积总库。
 可用 --output-dir 指定别的输出根（相对路径锚定到本脚本所在目录）。
 

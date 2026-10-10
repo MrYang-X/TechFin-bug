@@ -18,8 +18,8 @@ crawler_common.py    （仓库根；叶子模块：通用工具，不 import 任
 topic_config.py      （本目录；叶子模块：本主题的常量，不 import 任何本地模块）
         ▲
         │ import（三个脚本都 import 这两个）
-        ├── TechFin-bug.py              搜索引擎爬虫（百度 + 360）
-        ├── techfin_authoritative.py    官方政策源爬虫（人行 / 科技部 / 发改委）
+        ├── TechFin-bug.py              搜索引擎爬虫（百度 + Bing + 360）
+        ├── techfin_authoritative.py    官方源爬虫（广东科技厅 / 科技部）
         └── verify_corpus.py            印证报告（不采集，只读语料）
 ```
 
@@ -48,7 +48,7 @@ verify_corpus.py          ──读──→ 上面两个累积总库（或最�
 ```bash
 cd E:\Python\bug\A\A1
 
-python TechFin-bug.py               # ① 采集搜索引擎语料（默认百度，见下）
+python TechFin-bug.py               # ① 采集搜索引擎语料（默认县级走百度，见下）
 python techfin_authoritative.py     # ② 采集官方政策源语料
 python verify_corpus.py             # ③ 生成交叉印证报告
 ```
@@ -59,29 +59,52 @@ python verify_corpus.py             # ③ 生成交叉印证报告
 （由 `topic_config.INDEX_KEYWORDS` + `GUANGDONG_REGIONS` 展平而来）。`INDEX_KEYWORDS`
 已补全 4 个一级维度 / 12 个二级指标 / **35 条三级指标**；但**命令行默认只采 A1**
 （`--level2` 默认 `["A1"]`），默认口径是
-**A1 三级指标 × 广东省 124 个县级单元 = 372 条检索式**。
+**A1 三级指标 × 广东省 124 个县级单元 ≈ 1116 条检索式**（每条指标取前 3 条检索式，
+见 `QUERIES_PER_REGION`）。
 
-> 为什么默认不全量：百度资讯按 IP 限流，约 6~8 次快速请求即触发。全量 35 指标 ×
-> 124 单元 = 4340 条检索式，必须靠 `--level2` / `--cities` / `--offset` 分批推进。
-> 例如 `--level2 A1 A2 A3` 采完 A 维度，`--cities 广州市 深圳市` 按市分区。
+> 为什么默认不全量：百度资讯按 IP 限流。全量 35 指标 × 124 单元会远超额度，必须靠
+> `--level2` / `--cities` / `--offset` 分批推进。例如 `--level2 A1 A2 A3` 采完 A 维度，
+> `--cities 广州市 深圳市` 按市分区。另可下调 `QUERIES_PER_REGION` 直接减少总量。
 
 ```bash
-python TechFin-bug.py --list-plan --limit 6      # 零请求，先看清要打哪些检索式
+python TechFin-bug.py --list-plan --limit 6      # 零请求，先看清要打哪些检索式与路由
 python TechFin-bug.py --cities 广州市 深圳市      # 只采指定地级市（分区推进）
-python TechFin-bug.py --offset 0 --limit 6       # 分批切片，绕开百度限流
-python TechFin-bug.py --no-region                # 不带地区前缀，每个指标用全部展开式
-python TechFin-bug.py --sources 360              # 临时换源（默认只用百度，原因见下）
+python TechFin-bug.py --offset 0 --limit 20      # 分批切片，绕开百度限流
+python TechFin-bug.py --no-region                # 不带地区前缀（此时百度+Bing+360 三源并用）
+python TechFin-bug.py --sources baidu            # 临时只用一个源（如先验证百度是否可用）
+python TechFin-bug.py --fresh                    # 忽略续跑台账，全量重采
 ```
 
-**为什么必须分批。** 百度资讯按 IP 限流，约 6~8 次快速请求即触发，而 372 条检索式
-远超这个额度——**单轮采不全是常态，不是故障**。完整性靠"切片 + 累积 + 重跑"：
+**为什么必须分批。** 百度资讯按 IP 限流，而 1116 条检索式远超额度——**单轮采不全是
+常态，不是故障**。完整性靠"放慢节奏 + 切片 + 累积 + 重跑"：
 `--offset/--limit` 把计划切成小片，每片跑完结果合并进同一个累积总库（见 (c)），
 隔一段时间重跑即可补齐。每轮结尾的 `[覆盖率]` 会报各源成功了几条检索式，**缺口始终可见**。
+**重跑会读续跑台账**（`tech_fin_search_progress.csv`），跳过已成功采过的 (源, 检索式)，
+只补缺口——省下最稀缺的百度额度。
 
-**为什么只用百度。** 实测：对"荔湾区 高新技术企业"这种"县级地区 + 指标词"检索式，
-**百度严格做 AND 约束**（返回 10 条里 9 条含地区名、8 条两词兼有），而**360 只做松散
-匹配**（同检索式两词兼有 0/10）——360 会跑几百次请求却几乎不产出。故
-`ENABLED_SOURCES` 默认只有 `["baidu"]`；360 若要启用，应改用省级等更宽的粒度。
+**放慢节奏 + 分批是关键（2026-10 实测）。** 百度限流是**速率**敏感而非次数敏感：1s 连打
+几次即被封（同 IP 下 www/news/m 各站返回同一张验证页），而间隔 **≥20s 可连续采集**——
+实测 20s 间隔下 15 条里成功 14 条，且**唯一一次限流在第 14 条出现、等待约 8 分钟后第 15 条
+又恢复**（限流是暂时的，等得住就恢复）。故 `MIN_DELAY/MAX_DELAY` 已抬到 20/35s，
+百度退避阶梯设为 `[60,180,300]`（覆盖该恢复时间）。
+
+**推荐工作流（务实做法）：** 一轮跑 ~40 条就打住，隔 15 分钟以上再跑下一轮——
+靠 `--offset/--limit` 切片、靠续跑台账自动跳过已采的，多轮累积把 1116 条补齐。
+不要指望一轮跑完（1116 条即 8 小时，且百度会在途中周期性限流）。
+`--fresh` 可忽略台账全量重采。
+
+**为什么县级只能靠百度（换源收益极小）。** 实测：对"荔湾区 高新技术企业"这种
+"县级地区 + 指标词"检索式，**只有百度严格做 AND**（返回 10 条里 8 条两词兼有，
+经 `is_relevant` 全过）；**Bing 网页搜索与 360 只做松散匹配**——Bing 返回的 10 条里
+地区词命中 8 条、但指标词命中 **0** 条，全被 `is_relevant` 过滤（通过率 0%）；360 县级
+同样近 0。它们在**无地区**检索式上略有增益（Bing 约 1%、360 约 4%）。
+因此 `SOURCES_BY_REGION_LEVEL` 让**县级只走百度**，无地区才三源并用；
+`ENABLED_SOURCES` 仍列全三源备用。Google 网络不可达，Bing 新闻垂直（`news/search`、
+`?format=RSS`）已失效，搜狗第 2 次请求即返 200+验证页——均不可用。
+
+**按源隔离退避（多源改造的核心）。** 每个源有**独立的退避额度与跳闸状态**
+（`topic_config.BACKOFF_BY_SOURCE`）：某源被限流只跳过该源（额度用尽则"跳闸"停用），
+其余源继续，不再像旧版那样一个源限流就拖垮整轮。
 
 **锚点为什么默认不生效。** 主题锚点（`topic_config.ANCHOR_TERMS`）只在**不带地区**的
 检索式上启用。带地区时不再叠加——实测显示地区词本身已是强约束，再叠主题锚点属于
@@ -168,19 +191,30 @@ unit / region_code / region_name / indicators` 这几列。**在这之前采的�
 照抄本目录新建一个二级目录（如 `A/A2`），复制 `topic_config.py` 与三个脚本，然后**只改三处**：
 
 1. **`topic_config.py`** —— 这是主要工作：
-   - 检索词：`TECH_FIN_KEYWORDS` / `CORE_TERMS` / `QUALIFIER_TERMS` / `AUTH_KEYWORDS`
-     （题目级扁平词，供官方源爬虫 `AUTH_KEYWORDS` 使用）
+   - 官方源打标词：`AUTH_KEYWORDS`（官方源爬虫据此给条目打 `keyword` 标签与统计；
+     `SAVE_ALL_ITEMS=True` 时不参与筛选入库）。**它由 `INDEX_KEYWORDS` 派生**（取各三级
+     指标实际启用的前 `QUERIES_PER_REGION` 条检索式中的短词 + `AUTH_EXTRA_TERMS`），
+     改检索词即自动跟随。**搜索引擎的检索词【不在】这里**——它们在各三级指标的
+     `queries` 里，见下一条 `INDEX_KEYWORDS`
+   - 相关性约束：`CORE_TERMS` / `QUALIFIER_TERMS`（仅当检索词整串落在
+     `QUALIFIER_TERMS` 里时才生效；本主题留空、机制停用）
    - 指标体系：`INDEX_KEYWORDS`（字段名对齐 `tech_finance_index.sql` 的 `dim_index`；
      每条三级指标带 `level3_code` 稳定编码与 `min_region_level` 可得层级。**权重不在
      这里维护**——爬虫不消费权重，唯一权威是 SQL 的 `dim_index` 表，避免两处漂移）
      与 `ANCHOR_TERMS` / `QUERIES_PER_REGION`；地区口径 `GUANGDONG_REGIONS` /
      `REGION_QUERY_NAME_OVERRIDES`（换省份就是换这两个常量）
    - 噪声源：`NOISE_DOMAINS` / `NOISE_SOURCES` / `NOISE_URL_SUFFIXES`
-   - 采集范围与节奏：`MAX_PAGES_PER_KEYWORD` / `MAX_PAGES_BY_SOURCE` / `MIN_DELAY` /
-     `MAX_DELAY` / `OFFICIAL_DELAY` / `SAVE_ALL_ITEMS`
-   - 官方源清单：`SOURCES`
-   - 产物契约：`OUTPUT_ROOT`（换个输出根名）、`SEARCH_ACCUMULATOR` / `OFFICIAL_ACCUMULATOR`、`SEARCH_PREFIX` / `OFFICIAL_PREFIX`、`TOPIC_LABEL`
-2. **两个爬虫里与该主题站点相关的解析函数**（例如 `extract_source_date`、`extract_360_item`、`parse_list_rows` 的行容器启发式）——目标站变了就要跟着改。
+   - 采集范围与节奏：`ENABLED_SOURCES` / `SOURCES_BY_REGION_LEVEL`（按检索式粒度选源）、
+     `BACKOFF_BY_SOURCE` / `DELAY_BY_SOURCE`（按源隔离的退避与间隔）、
+     `MAX_PAGES_PER_KEYWORD` / `MAX_PAGES_BY_SOURCE` / `MIN_DELAY` / `MAX_DELAY` /
+     `OFFICIAL_DELAY` / `SAVE_ALL_ITEMS`
+   - 官方源清单：`SOURCES`（**栏目要选"真正发布指标内容"的**：现行是广东省科技厅
+     通知公告/政策文件 + 科技部通知通告；指向"新闻/发布会"栏目的源标题里不会有指标词，
+     打标会全空，详见该常量上方的实测注释）
+   - 产物契约：`OUTPUT_ROOT`（换个输出根名）、`SEARCH_ACCUMULATOR` / `OFFICIAL_ACCUMULATOR`、
+     `SEARCH_PROGRESS`（续跑台账）、`SEARCH_PREFIX` / `OFFICIAL_PREFIX`、`TOPIC_LABEL`
+2. **两个爬虫里与该主题站点相关的解析函数**（例如 `extract_source_date`、`extract_360_item`、
+   `extract_bing_item`、`parse_list_rows` 的行容器启发式）——目标站变了就要跟着改。
 3. 输出根目录名（就是 `topic_config.OUTPUT_ROOT` 那一项）。
 
 **不需要碰 `crawler_common.py`。** 这正是把它拆出去的目的：通用机械一份，主题差异各管各的。

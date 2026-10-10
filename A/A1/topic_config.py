@@ -11,22 +11,28 @@
 
 TOPIC_LABEL = "科技金融指数研究"
 
-# ==================== 检索词 ====================
+# ==================== 官方源打标词 ====================
+#
+# 【搜索引擎的检索词不在这里！】它们由下方 INDEX_KEYWORDS 的三级指标 queries 逐条
+# 展开（见 build_search_plan）：带地区时前拼地区名，不带地区时叠加 ANCHOR_TERMS。
+#
+# 本组常量只服务官方源爬虫 techfin_authoritative.py：给条目打 keyword 标签并统计。
+# 因 SAVE_ALL_ITEMS=True（见下），它【不参与"是否入库"的筛选】，只是标签——但
+# verify_corpus.py 的"仅官方源(命中检索词)"一列读的正是这个标签，故仍需维护。
+#
+# 【取值方式】不再是手写常量，而是由 INDEX_KEYWORDS 派生（见下方 QUERIES_PER_REGION
+# 之后的 AUTH_KEYWORDS / _derive_auth_keywords）：每条三级指标取【实际启用的前
+# QUERIES_PER_REGION 条检索式】——与采集口径完全一致，改检索词即自动跟随，杜绝
+# "配置里两处各维护一份、互相漂移"。官方标题常用但指标里没有的写法（如"研发经费"
+# "科技经费"）走 AUTH_EXTRA_TERMS 兜底。
 
-# 搜索引擎用的检索词（逐个检索，各自翻页）
-TECH_FIN_KEYWORDS = [
-    "金融科技", "科技金融", "发展指数"
-]
-
-# 核心检索词：命中即可入库
-CORE_TERMS = ["金融科技", "科技金融"]
-# 限定词：必须与核心词在同一篇标题/摘要中共现，否则视为噪声
-# （实测"发展指数"单独检索 10 条中 0 条与科技金融相关：教育强国指数、
-#   人类发展指数、商贸零售上市公司发展指数……故加 AND 约束）
-QUALIFIER_TERMS = ["发展指数"]
-
-# 官方源用的筛选词。官方源是全量抓取后再筛，默认沿用上面那组。
-AUTH_KEYWORDS = TECH_FIN_KEYWORDS
+# 相关性约束（核心词 / 限定词）：只有当检索词【整串】出现在 QUALIFIER_TERMS 里时，
+# CORE_TERMS 才参与判断（见 crawler_common.is_relevant）。本主题的检索词都是独立
+# 强词，无需"与核心词共现"的约束，故 QUALIFIER_TERMS 置空——该机制整体停用。
+# 两个常量保留为空列表是因为两个爬虫的调用点仍传入它们（TechFin-bug.py、
+# techfin_authoritative.py）；将来若引入易泛化的词，填 QUALIFIER_TERMS 即可重新启用。
+CORE_TERMS = []
+QUALIFIER_TERMS = []
 
 # ==================== 地区口径：广东省县级区划 ====================
 # 来源：民政部《2024 年中华人民共和国县以上行政区划代码》，与 tech_finance_index.sql
@@ -236,19 +242,65 @@ INDEX_KEYWORDS = {
                 "level3_code": "A101",
                 "level3_name": "高新技术企业数量/密度",
                 "unit": "家或家/万人",
-                "queries": ["高新技术企业", "高新技术企业 认定", "高新技术企业 数量"],
+                "queries": [
+                    "高新技术企业",
+                    "国家高新技术企业",
+                    "高企",
+                    "高新技术企业认定",
+                    "高新技术企业名单",
+                    "高新技术企业公示",
+                    "有效高新技术企业",
+                    "当年认定高新技术企业",
+                    "高新技术企业数量",
+                    "高企数量",
+                    "高新技术企业密度",
+                    "高企密度",
+                    "每万人高新技术企业数",
+                    "每万家企业高新技术企业数",
+                    "高新技术企业占规上工业企业比重",
+                ],
             },
             {
                 "level3_code": "A102",
                 "level3_name": "科技型中小企业库入库数量",
                 "unit": "家",
-                "queries": ["科技型中小企业 入库", "科技型中小企业 评价"],
+                "queries": [
+                    "科技型中小企业",
+                    "国家科技型中小企业",
+                    "科技型中小企业评价",
+                    "科技型中小企业信息库",
+                    "入库登记编号",
+                    "入库企业",
+                    "入库数量",
+                    "科技型中小企业入库",
+                    "科技型中小企业名单",
+                    "科技型中小企业公示",
+                    "科技型中小企业评价系统",
+                    "科技部火炬中心 科技型中小企业",
+                ],
             },
             {
                 "level3_code": "A103",
                 "level3_name": "R&D经费支出占GDP比重",
                 "unit": "%",
-                "queries": ["研发经费投入强度", "R&D经费 占GDP比重", "全社会研发投入"],
+                "queries": [
+                    # 前 3 条是带地区采集实际启用的（见 QUERIES_PER_REGION）。刻意混入
+                    # "研发"写法（中文新闻/统计公报常用），避免只打 R&D/研究与试验发展
+                    # 口径而整块漏掉"研发经费""研发投入强度"这类表述。
+                    "R&D经费",
+                    "研发投入强度",
+                    "研究与试验发展经费",
+                    "全社会R&D经费",
+                    "R&D经费支出",
+                    "R&D经费投入强度",
+                    "研发经费投入强度",
+                    "研究与试验发展经费支出占GDP比重",
+                    "全社会研发投入占GDP比重",
+                    "研发经费支出占地区生产总值比重",
+                    "规上工业企业研发费用",
+                    "规上工业企业R&D经费",
+                    "研发费用加计扣除",
+                ],
             },
         ],
     },
@@ -549,8 +601,40 @@ INDEX_KEYWORDS = {
 ANCHOR_TERMS = ["科技金融", "金融科技", "科技创新", "科技企业",
                 "科技成果转化", "高新区", "高新技术产业", "科创"]
 
-# 带地区前缀采集时，每条指标取前 N 条检索式（见 INDEX_KEYWORDS 上方说明）
-QUERIES_PER_REGION = 1
+# 带地区前缀采集时，每条指标取前 N 条检索式（见 INDEX_KEYWORDS 上方说明）。
+# A1 的检索词表已扩到 40 条（A101=15 / A102=12 / A103=13），地区采集取前 3 条 =
+# 124 个县级单元 × 3 指标 × 3 = 1116 条检索式。百度限流下不可能单轮跑完，
+# 靠 --offset/--limit/--cities 分批 + 累积总库补齐；其余 37 条留给 --no-region。
+QUERIES_PER_REGION = 3
+
+# ---- 官方源打标词（给 techfin_authoritative.py 用）：由 INDEX_KEYWORDS 派生 ----
+# 官方标题多为政策/公报口径，is_relevant 要求【逐 token 字面命中】，故只取各指标
+# 实际启用的前几条检索式（短而常用）；长口径名几乎不命中，不取自全部 queries。
+# 改上面的 queries 或 QUERIES_PER_REGION，这里自动跟随，不再手写第二份。
+AUTH_EXTRA_TERMS = ["研发经费", "科技经费"]
+
+
+def _derive_auth_keywords():
+    """
+    各三级指标 queries[:QUERIES_PER_REGION] 中【短且无空格】的词（保序去重）+ AUTH_EXTRA_TERMS。
+
+    只取短词，是因为 is_relevant 要求标题【逐 token 字面命中】：带空格的多词短语
+    （如"私募股权 创业投资 机构"）在官方标题里几乎不可能整串出现，纳进来只会让
+    打标与 per_keyword 统计全是空转。
+    """
+    terms = []
+    for node in INDEX_KEYWORDS.values():
+        for ind in node["indicators"]:
+            for q in ind["queries"][:QUERIES_PER_REGION]:
+                if " " not in q and len(q) <= 8 and q not in terms:
+                    terms.append(q)
+    for t in AUTH_EXTRA_TERMS:
+        if t not in terms:
+            terms.append(t)
+    return terms
+
+
+AUTH_KEYWORDS = _derive_auth_keywords()
 
 # ==================== 噪声源黑名单 ====================
 
@@ -568,22 +652,70 @@ NOISE_URL_SUFFIXES = [".pdf"]
 
 # ==================== 采集范围与节奏 ====================
 
-# 搜索引擎：启用哪些源。某源被限流时只跳过该源，其它源继续。
+# 搜索引擎：启用哪些源。某源被限流时只跳过该源，其它源继续（见 BACKOFF_BY_SOURCE）。
 #
-# 【实测结论·勿删】指标化采集【只用百度】。本轮检索式是"县级地区 + 指标词"，
-# 百度会严格做 AND 约束（实测"荔湾区 高新技术企业"返回 10 条有 9 条含地区名、
-# 8 条两词兼有），而 360 只做松散匹配（同检索式两词兼有 0/10）——360 跑几百次
-# 请求却几乎不产出。360 若要启用，应改用省级等更宽的粒度，而不是县级。
-ENABLED_SOURCES = ["baidu"]
+# 【实测结论·2026-10】本轮检索式是"县级地区 + 指标词"，逐源实测如下：
+#   - 百度资讯：唯一做严格 AND 的源（"荔湾区 高新技术企业"10 条里 8 条两词兼有），
+#     且有绝对日期；但按 IP 限流（IP 级、粘滞，同 IP 下 www/news/m 各站返回同一张
+#     验证页）。关键实测：请求间隔拉到 ≥20s 可持续采集（连打 13+ 次全部成功），
+#     而 1s 连打几次即被封——【放慢节奏是唯一有效的手段】。
+#   - Bing 网页搜索 cn.bing.com/search：不限流（连打 12 次全 200），但只做松散匹配：
+#     县级检索式 10 条里地区词命中 8 条、指标词命中 0 条，全被 is_relevant 过滤
+#     （0% 通过）；无地区检索式约 1% 可用。=>【不能替代百度做县级】。
+#   - 360 新闻：不限流、有日期，但同样松散，县级近乎 0；无地区约 4% 可用。
+#   - 搜狗：第 2 次请求即返 200+验证页，限流更甚于百度，不接入。
+#   - Google 网络不可达；Bing 新闻垂直（news/search、?format=RSS）已失效。
+#
+# 结论：县级指标采集【本质只能靠百度】；真正的解法是"放慢百度节奏 + 多轮累积 +
+# 断点续跑"，换源收益极小。Bing/360 仅作无限流的补充源，在无地区检索式上略有增益。
+ENABLED_SOURCES = ["baidu", "bing", "360"]
+
+# 按检索式粒度选源：键为级别，值为该级别允许的源（仍受 ENABLED_SOURCES / --sources 约束）。
+# 级别由计划是否带地区判定：带地区=county（县级单元），不带=none。
+# 县级实测只有百度能过相关性过滤，Bing/360 跑它纯属浪费请求，故只留百度；
+# 无地区检索式三源并用。
+SOURCES_BY_REGION_LEVEL = {
+    "county": ("baidu",),
+    "none": ("baidu", "bing", "360"),
+}
+
+# 按源隔离的退避策略：某源被限流只影响该源，其它源继续采（这是多源改造的核心）。
+# backoff = 逐次等待秒数；max_total = 本轮该源最多退避几次，用尽即"跳闸"停用该源。
+# 百度实测（20s 间隔）：约每 13 次撞一次限流，且【等待会恢复】——实测退避到 ~8 分钟
+# 后下一条即成功。故给一条能覆盖该恢复时间的阶梯 [60,180,300]，但用 max_total 限总量
+# （否则一次硬封会在一轮里干等几十分钟）。
+BACKOFF_BY_SOURCE = {
+    "baidu": {"backoff": [60, 180, 300], "max_total": 2},
+    "bing": {"backoff": [10, 30], "max_total": 3},
+    "360": {"backoff": [5, 10], "max_total": 2},
+}
+BACKOFF_DEFAULT = {"backoff": [30], "max_total": 2}
+
+# "松散匹配源"：它们返回的结果可能不含地区词字面量，须用 region_aliases 补偿过滤。
+# （注：带地区检索式里 is_relevant 的 token-AND 已隐含地区词约束，此项主要是别名
+#  兜底与策略显式化；无地区检索式时 region_aliases 为空，自动失效。）
+LOOSE_SOURCES = ("360",)
 
 # 每个源翻多少页。指标检索式取首屏即够，额度要花在"多检索式"而不是"多翻页"上。
 MAX_PAGES_PER_KEYWORD = 3          # 默认值（未在 MAX_PAGES_BY_SOURCE 中指定的源用它）
 MAX_PAGES_BY_SOURCE = {
     "baidu": 1,
+    "bing": 1,
+    "360": 1,
 }
-# 百度按 IP 限流（约 6~8 次快速请求即触发），指标采集请求总量大，把间隔拉长
-MIN_DELAY = 12.0
-MAX_DELAY = 25.0
+# 每页之间的礼貌间隔（秒）。实测百度间隔 ≥20s 可持续采集（<20s 很快触发验证页），
+# 故百度地板抬高到 20s；Bing/360 几乎不限流，用短间隔即可。
+# MIN_DELAY/MAX_DELAY 是百度的默认值（warm_up_session 亦用它）。
+# 注意：1116 条 × 约 27s ≈ 8 小时/轮；要更快请用 --limit/--offset 分批多轮累积，
+# 或下调 QUERIES_PER_REGION 减少检索式总量。
+MIN_DELAY = 20.0
+MAX_DELAY = 35.0
+DELAY_BY_SOURCE = {
+    "baidu": (MIN_DELAY, MAX_DELAY),
+    "bing": (1.0, 3.0),
+    "360": (1.0, 3.0),
+}
+DELAY_DEFAULT = (3.0, 6.0)
 
 # 官方源：每个源翻多少页（页数直接决定回溯的年头）
 MAX_PAGES_PER_SOURCE = 10
@@ -598,26 +730,36 @@ SAVE_ALL_ITEMS = True
 ACCUMULATE = True
 
 # 官方政策源清单。分页规律各不相同，first_page_no 为"第二页"的编号。
+#
+# 【2026-10 换栏目·勿删】原三个人行/科技部/发改委源指向的都是"新闻/发布会"栏目
+# （人行新闻发布、科技部工作动态、发改委新闻发布），标题全是会谈/发布会口径——
+# 600 条里【没有一条】含 A1 指标词，keyword 列全空。故换成真正发布指标内容的栏目：
+#   - 广东省科技厅·通知公告：高企认定/取消资格公告、科技型中小企业评价/入库名单公示等，
+#     每页 3~7 条命中指标词（实测），且是省级口径、与本主题的广东县级范围同侧。
+#   - 广东省科技厅·政策文件：科技政策口径补充。
+#   - 科技部·通知通告：国家级补充（命中较少）。
+# 分页实测：gdstc 为 index.html + index_2.html…（无 index_1.html）；most 为 index.html + index_1.html…。
+# 未采用的站点：科技部科技统计/国家统计局/广东统计局统计年鉴均 404 或 SPA（0 条可解析）。
 SOURCES = [
     {
-        "name": "pbc",
-        "label": "中国人民银行",
-        "list_url": "http://www.pbc.gov.cn/goutongjiaoliu/113456/113469/index.html",
-        "page_url": "http://www.pbc.gov.cn/goutongjiaoliu/113456/113469/11040-{n}.html",
+        "name": "gdstc_tzgg",
+        "label": "广东省科学技术厅·通知公告",
+        "list_url": "https://gdstc.gd.gov.cn/zwgk_n/tzgg/index.html",
+        "page_url": "https://gdstc.gd.gov.cn/zwgk_n/tzgg/index_{n}.html",
         "first_page_no": 2,
     },
     {
-        "name": "most",
-        "label": "科技部",
-        "list_url": "https://www.most.gov.cn/kjbgz/index.html",
-        "page_url": "https://www.most.gov.cn/kjbgz/index_{n}.html",
-        "first_page_no": 1,
+        "name": "gdstc_zcfg",
+        "label": "广东省科学技术厅·政策文件",
+        "list_url": "https://gdstc.gd.gov.cn/zwgk_n/zcfg/gfwj/index.html",
+        "page_url": "https://gdstc.gd.gov.cn/zwgk_n/zcfg/gfwj/index_{n}.html",
+        "first_page_no": 2,
     },
     {
-        "name": "ndrc",
-        "label": "国家发改委",
-        "list_url": "https://www.ndrc.gov.cn/xwdt/xwfb/",
-        "page_url": "https://www.ndrc.gov.cn/xwdt/xwfb/index_{n}.html",
+        "name": "most_tztg",
+        "label": "科技部·通知通告",
+        "list_url": "https://www.most.gov.cn/tztg/index.html",
+        "page_url": "https://www.most.gov.cn/tztg/index_{n}.html",
         "first_page_no": 1,
     },
 ]
@@ -631,6 +773,10 @@ OUTPUT_ROOT = "techfin_common_output"
 # 累积总库（位于输出根内），跨轮读写；每轮目录里的 *_cumulative.csv 是它的快照副本
 SEARCH_ACCUMULATOR = "tech_fin_news.csv"
 OFFICIAL_ACCUMULATOR = "techfin_official.csv"
+
+# 断点续跑台账（位于输出根内，跨轮读写）：记录已成功采过的 (源, 检索式)，
+# 重跑时跳过，避免把稀缺的百度额度重打在已完成的检索式上。--fresh 可忽略它全量重采。
+SEARCH_PROGRESS = "tech_fin_search_progress.csv"
 
 # 每轮产物的文件名前缀：两个采集脚本共用同一个输出根与当日序号，
 # 靠前缀区分是谁产出的（目录里可能同时出现 search_* 与 official_*）
@@ -710,6 +856,9 @@ def _make_plan(node, l2, ind, query, region_code, region_name, city_name,
         # 带地区时为 ()（地区词已是强约束，见 ANCHOR_TERMS 上方实测说明）；
         # 不带地区时用主题锚点，防止"高新技术企业"泛化到全国无关报道。
         "anchor_terms": anchor_terms,
+        # 地区别名（规范名 / 市名），供松散源（LOOSE_SOURCES）做"必需地区词"补偿过滤；
+        # 无地区检索式时为空元组，required_terms 自动失效。
+        "region_aliases": tuple(filter(None, {region_name, city_name})),
     }
 
 
