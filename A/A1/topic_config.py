@@ -258,6 +258,21 @@ INDEX_KEYWORDS = {
                     "每万人高新技术企业数",
                     "每万家企业高新技术企业数",
                     "高新技术企业占规上工业企业比重",
+                    # ---- 数值型检索式（2026-10 新增，供正文数值抽取用）----
+                    # 以上前 3 条（QUERIES_PER_REGION）用于【带地区】采集；这里追加的词
+                    # 排在后面，故【只在 --no-region 无地区采集时启用】，专门召回
+                    # "新增高企 X 家""总数突破 X 家""存量 X 家"这类含具体数字的报道，
+                    # 供 techfin_extract_points.py 抽数据点。带地区口径保持不变（不重跑①）。
+                    "新增高新技术企业",
+                    "高新技术企业 净增",
+                    "高新技术企业 总数",
+                    "高新技术企业 存量",
+                    "高新技术企业 保有量",
+                    "高新技术企业 累计",
+                    "高新技术企业 数量 突破",
+                    "高新技术企业 家",
+                    "高企 新增",
+                    "高企 突破",
                 ],
             },
             {
@@ -774,8 +789,11 @@ OUTPUT_ROOT = "techfin_common_output"
 SEARCH_ACCUMULATOR = "tech_fin_news.csv"
 OFFICIAL_ACCUMULATOR = "techfin_official.csv"
 
-# 断点续跑台账（位于输出根内，跨轮读写）：记录已成功采过的 (源, 检索式)，
-# 重跑时跳过，避免把稀缺的百度额度重打在已完成的检索式上。--fresh 可忽略它全量重采。
+# 断点续跑台账（位于输出根内，跨轮读写）：**只是"进度标记"，不是数据文件**——
+# 一行 = (source, plan_key, status, n_items, ts)，记录某个 (源, 检索式) 已成功采完。
+# 重跑时跳过，避免把稀缺的百度额度重打在已完成的检索式上；--fresh 可忽略它全量重采。
+# 数据与出处链接在【运行目录】里：<日期-次数>/search_delta.csv 与 search_links.txt。
+# 注：数据是"边采边增量落盘"的（不是跑完才写），且台账只在数据落盘后才记。
 SEARCH_PROGRESS = "tech_fin_search_progress.csv"
 
 # 每轮产物的文件名前缀：两个采集脚本共用同一个输出根与当日序号，
@@ -793,6 +811,38 @@ ACCUMULATOR_FILES = {
     "search": SEARCH_ACCUMULATOR,
     "official": OFFICIAL_ACCUMULATOR,
 }
+
+
+# ==================== 正文抓取 / 数值抽取 产物契约（②③）====================
+# "三段解耦流水线"的②（techfin_fetch_body.py）与③（techfin_extract_points.py）常量。
+# ②③ 与①（TechFin-bug.py）一样只通过文件耦合、互不 import。
+
+# ---- ② 正文缓存（放输出根内、不放运行目录：跨轮复用，是"抽取规则迭代时不重抓网页"的核心）----
+BODY_CACHE_DIR = "body_cache"          # 缓存根：正文 JSON/TXT + 附件二进制
+BODY_PROGRESS = "body_progress.csv"    # ② 断点续跑台账（source="body", plan_key=<article_id>）
+BODY_PREFIX = "body_"                  # ② 每轮产物前缀（body_log / body_index.csv ...）
+
+# ---- ③ 数值数据点产物 ----
+POINTS_ACCUMULATOR = "techfin_a101_points.csv"  # 证据级数据点累积总库（跨轮读写）
+POINTS_PREFIX = "points_"                       # ③ 每轮产物前缀（points_log / points_delta.csv ...）
+LLM_CACHE_DIR = "a101_llm_cache"                # LLM 结果缓存（key=article_id+prompt_version+model）
+LLM_CALLS_LOG = "a101_llm_calls.jsonl"          # LLM 调用审计（逐次追加）
+
+# ---- ② 二级抓取的节奏与范围 ----
+HOST_MIN_INTERVAL = 3.0        # 同一主机两次请求的最小间隔（秒），按 host 礼貌限速
+ATTACHMENT_EXTS = (".pdf", ".doc", ".docx", ".xls", ".xlsx", ".wps", ".et")
+MAX_ATTACHMENTS_PER_PAGE = 10  # 单页最多下载的附件数（防个别页面挂几十个附件）
+ATTACH_MIN_BYTES = 1024        # 小于此字节数的附件视为无效（多为错误页/占位）
+ROBOTS_ENFORCE = True          # 是否遵守 robots.txt
+BODY_MAX_BYTES = 20 * 1024 * 1024  # 单文件下载上限（防超大附件拖垮）
+
+
+# ---- ④ 语料清洗/提纯产物契约 ----
+CURATED_ACCUMULATOR = "curated_corpus.csv"    # 文章级干净语料（跨轮覆盖式重构，幂等）
+CURATED_UNCERTAIN = "curated_uncertain.csv"   # 官方"泛化标题"待正文确认队列（供②补抓）
+CURATED_DROPPED = "curated_dropped.csv"       # 被剔除条目（含原因，便于复核）
+CURATED_PREFIX = "curated_"                   # ④ 每轮产物前缀（curated_log / curated_report.md ...）
+
 
 # 印证报告文件名
 REPORT_NAME = "corpus_verification.md"

@@ -60,6 +60,7 @@ from crawler_common import (  # noqa: E402
     export_url_mapping,
     generate_article_id,
     get_random_headers,
+    guess_encoding,
     is_noise_source,
     is_relevant,
     load_progress,
@@ -120,7 +121,7 @@ def fetch_with_backoff(url, session, referer, source):
             print(f"  [异常] {label} 请求失败：{e}")
             return None
 
-        resp.encoding = "utf-8"
+        resp.encoding = guess_encoding(resp)
         if resp.status_code != 200:
             print(f"  [警告] {label} 状态码 {resp.status_code}")
             return None
@@ -419,7 +420,8 @@ SOURCES = {
 
 
 def crawl_all_keywords(plans, max_pages=3, resolve_url=False,
-                       enabled_sources=None, progress_path=None, fresh=False):
+                       enabled_sources=None, progress_path=None, fresh=False,
+                       flush_cb=None):
     """
     多源采集。返回 (文章列表, 统计信息)。
 
@@ -432,8 +434,12 @@ def crawl_all_keywords(plans, max_pages=3, resolve_url=False,
     按源隔离：某源被限流只跳过该源该检索式（额度用尽则跳闸停用该源），其余源继续——
     这是多源改造的核心目的。
 
-    progress_path 非空且 fresh=False 时，跳过台账里已成功的 (源, 检索式) 并边采边
-    落盘，让重跑只补缺口（省下最稀缺的百度额度）。
+    progress_path 非空且 fresh=False 时，跳过台账里已成功的 (源, 检索式)，让重跑只补缺口
+    （省下最稀缺的百度额度）。
+
+    flush_cb(items) 每条检索式采完后被调用一次，把当前已采的全部条目落盘。**先 flush、
+    再写台账**——保证台账不领先数据（否则中断后重跑会跳过"记了 ok 却没数据"的检索式，
+    数据永久缺失）。收到 Ctrl-C 时也会先 flush 再正常返回。
     """
     enabled = enabled_sources or cfg.ENABLED_SOURCES
     session = requests.Session()
@@ -464,145 +470,166 @@ def crawl_all_keywords(plans, max_pages=3, resolve_url=False,
 
     total = len(plans)
     idle_noted = False
-    for idx, plan in enumerate(plans, 1):
-        kw = plan["query"]
-        stats["per_keyword"][kw] = 0
+    interrupted = False
+    pending_progress = []   # 本条的台账行；先落盘、后写台账（保证台账不领先数据）
 
-        # 按检索式粒度选源：带地区 = county，不带 = none
-        level = "county" if plan.get("region_code") else "none"
-        allowed = cfg.SOURCES_BY_REGION_LEVEL.get(level, tuple(enabled))
-        plan_sources = [s for s in enabled if s in allowed]
-        for s in plan_sources:
-            stats["plans_by_source"][s] += 1
-        # 断点续跑键：确定性、跨轮稳定
-        plan_key = (f"{plan.get('region_code', '')}"
-                    f"|{plan.get('level3_code', '')}|{kw}")
+    def _flush_and_log():
+        """先把当前已采数据落盘，再补写台账——台账 ⟸ 数据，中断也不会谎报"已完成"。"""
+        if flush_cb:
+            flush_cb(list(by_id.values()))
+        if progress_path and pending_progress:
+            append_progress(progress_path, list(pending_progress))
+            del pending_progress[:]
 
-        # 该检索式的所有路由源都已跳闸 → 不做请求、也不空等，直接看下一条。
-        # 否则某源跳闸后，剩余上千条检索式会以 3~5s 的间隔空跑一遍，纯浪费（实测踩过）。
-        active = [s for s in plan_sources if not _throttle_state(s)["tripped"]]
-        if not active:
-            if plan_sources and not idle_noted:
-                print(f"\n[跳过] 从第 {idx} 条起，其全部源均已跳闸，"
-                      f"后续检索式不再请求、也不再空等，本轮到此基本结束。")
-                idle_noted = True
-            continue
+    try:
+        for idx, plan in enumerate(plans, 1):
+            kw = plan["query"]
+            stats["per_keyword"][kw] = 0
 
-        where = plan["region_name"] or "（无地区）"
-        print(f"\n[{idx}/{total}] {where} · {plan['level3_name']}")
-        print(f"  检索式：{kw}")
+            # 按检索式粒度选源：带地区 = county，不带 = none
+            level = "county" if plan.get("region_code") else "none"
+            allowed = cfg.SOURCES_BY_REGION_LEVEL.get(level, tuple(enabled))
+            plan_sources = [s for s in enabled if s in allowed]
+            for s in plan_sources:
+                stats["plans_by_source"][s] += 1
+            # 断点续跑键：确定性、跨轮稳定
+            plan_key = (f"{plan.get('region_code', '')}"
+                        f"|{plan.get('level3_code', '')}|{kw}")
 
-        for source_name in active:
-            label = SOURCE_LABEL.get(source_name, source_name)
-            if progress_path and (source_name, plan_key) in done:
-                stats["resumed_skipped"] += 1
-                stats["skipped_by_source"][source_name] += 1
-                print(f"  -- 源：{label} [续跑] 该检索式已采过，跳过")
+            # 该检索式的所有路由源都已跳闸 → 不做请求、也不空等，直接看下一条。
+            # 否则某源跳闸后，剩余上千条检索式会以 3~5s 的间隔空跑一遍，纯浪费（实测踩过）。
+            active = [s for s in plan_sources if not _throttle_state(s)["tripped"]]
+            if not active:
+                if plan_sources and not idle_noted:
+                    print(f"\n[跳过] 从第 {idx} 条起，其全部源均已跳闸，"
+                          f"后续检索式不再请求、也不再空等，本轮到此基本结束。")
+                    idle_noted = True
                 continue
 
-            fetcher = SOURCES[source_name]
-            # 每个源翻几页由配置决定：百度吃限流额度，指标检索式只取首屏
-            per_source_pages = cfg.MAX_PAGES_BY_SOURCE.get(source_name, max_pages)
-            print(f"  -- 源：{label}（{per_source_pages} 页）")
-            source_failed = False
-            # 松散匹配源需补偿过滤：结果须命中地区别名之一（无地区时自动失效）
-            required = (plan.get("region_aliases", ())
-                        if source_name in cfg.LOOSE_SOURCES else ())
+            where = plan["region_name"] or "（无地区）"
+            print(f"\n[{idx}/{total}] {where} · {plan['level3_name']}")
+            print(f"  检索式：{kw}")
 
-            for page in range(per_source_pages):
-                print(f"    第 {page + 1} 页 ...", end=" ")
-                articles = fetcher(kw, page=page, session=session)
+            for source_name in active:
+                label = SOURCE_LABEL.get(source_name, source_name)
+                if progress_path and (source_name, plan_key) in done:
+                    stats["resumed_skipped"] += 1
+                    stats["skipped_by_source"][source_name] += 1
+                    print(f"  -- 源：{label} [续跑] 该检索式已采过，跳过")
+                    continue
 
-                if articles is None:
-                    # 该源被限流/失败：只跳过这个源，其它源继续
-                    source_failed = True
-                    stats["failed_pages"] += 1
-                    stats["failed_by_source"][source_name] = \
-                        stats["failed_by_source"].get(source_name, 0) + 1
-                    print(f"[中断] {label} 该检索式被限流，跳过；"
-                          f"其它源继续，已采数据保留")
-                    break
+                fetcher = SOURCES[source_name]
+                # 每个源翻几页由配置决定：百度吃限流额度，指标检索式只取首屏
+                per_source_pages = cfg.MAX_PAGES_BY_SOURCE.get(source_name, max_pages)
+                print(f"  -- 源：{label}（{per_source_pages} 页）")
+                source_failed = False
+                source_new = 0      # 该源该检索式本次新增条数（供台账 n_items）
+                # 松散匹配源需补偿过滤：结果须命中地区别名之一（无地区时自动失效）
+                required = (plan.get("region_aliases", ())
+                            if source_name in cfg.LOOSE_SOURCES else ())
 
-                if not articles:
-                    print("无结果，停止翻页")
-                    break
+                for page in range(per_source_pages):
+                    print(f"    第 {page + 1} 页 ...", end=" ")
+                    articles = fetcher(kw, page=page, session=session)
 
-                new_count = 0
-                for art in articles:
-                    combined = f"{art['title']} {art['summary']}"
+                    if articles is None:
+                        # 该源被限流/失败：只跳过这个源，其它源继续
+                        source_failed = True
+                        stats["failed_pages"] += 1
+                        stats["failed_by_source"][source_name] = \
+                            stats["failed_by_source"].get(source_name, 0) + 1
+                        print(f"[中断] {label} 该检索式被限流，跳过；"
+                              f"其它源继续，已采数据保留")
+                        break
 
-                    if is_noise_source(art["url"], art["source"], cfg.NOISE_DOMAINS,
-                                   cfg.NOISE_SOURCES, cfg.NOISE_URL_SUFFIXES):
-                        stats["noise_dropped"] += 1
-                        continue
-                    if not is_relevant(combined, kw, cfg.CORE_TERMS,
-                                             cfg.QUALIFIER_TERMS,
-                                             plan.get("anchor_terms", ()),
-                                             required_terms=required):
-                        stats["irrelevant_dropped"] += 1
-                        continue
+                    if not articles:
+                        print("无结果，停止翻页")
+                        break
 
-                    art_id = generate_article_id(art["title"], art["url"])
-                    art["article_id"] = art_id
-                    # 指标归属：一篇文章可能同时印证多条指标，用 indicators 累积
-                    tag = f"{plan['level2_code']}:{plan['level3_name']}"
+                    new_count = 0
+                    for art in articles:
+                        combined = f"{art['title']} {art['summary']}"
 
-                    if art_id in by_id:
-                        # 同一篇被两源/多个检索式命中 —— 记录引擎与指标叠加，
-                        # 这本身就是一个免费的双源印证信号
-                        existing = by_id[art_id]
-                        if art["engine"] not in existing["engines"].split("+"):
-                            existing["engines"] += "+" + art["engine"]
-                            stats["engines_merged"] += 1
-                        cur = existing.get("indicators", "")
-                        if tag not in cur.split("+"):
-                            existing["indicators"] = (cur + "+" + tag).strip("+")
-                        continue
+                        if is_noise_source(art["url"], art["source"], cfg.NOISE_DOMAINS,
+                                       cfg.NOISE_SOURCES, cfg.NOISE_URL_SUFFIXES):
+                            stats["noise_dropped"] += 1
+                            continue
+                        if not is_relevant(combined, kw, cfg.CORE_TERMS,
+                                                 cfg.QUALIFIER_TERMS,
+                                                 plan.get("anchor_terms", ()),
+                                                 required_terms=required):
+                            stats["irrelevant_dropped"] += 1
+                            continue
 
-                    art["engines"] = art["engine"]
-                    # 指标与地区标识（单值列取"首个命中"的指标，便于简单聚合；
-                    # 全量归属在 indicators 里）
-                    art["level1_code"] = plan["level1_code"]
-                    art["level1_name"] = plan["level1_name"]
-                    art["level2_code"] = plan["level2_code"]
-                    art["level2_name"] = plan["level2_name"]
-                    art["level3_code"] = plan["level3_code"]
-                    art["level3_name"] = plan["level3_name"]
-                    art["unit"] = plan["unit"]
-                    art["region_code"] = plan["region_code"]
-                    art["region_name"] = plan["region_name"]
-                    art["indicators"] = tag
+                        art_id = generate_article_id(art["title"], art["url"])
+                        art["article_id"] = art_id
+                        # 指标归属：一篇文章可能同时印证多条指标，用 indicators 累积
+                        tag = f"{plan['level2_code']}:{plan['level3_name']}"
 
-                    # 可选：解析真实URL
-                    if resolve_url:
-                        art["real_url"] = resolve_real_url(art["url"], session)
-                        time.sleep(random.uniform(RESOLVE_DELAY * 0.7,
-                                                  RESOLVE_DELAY * 1.3))
+                        if art_id in by_id:
+                            # 同一篇被两源/多个检索式命中 —— 记录引擎与指标叠加，
+                            # 这本身就是一个免费的双源印证信号
+                            existing = by_id[art_id]
+                            if art["engine"] not in existing["engines"].split("+"):
+                                existing["engines"] += "+" + art["engine"]
+                                stats["engines_merged"] += 1
+                            cur = existing.get("indicators", "")
+                            if tag not in cur.split("+"):
+                                existing["indicators"] = (cur + "+" + tag).strip("+")
+                            continue
 
-                    by_id[art_id] = art
-                    new_count += 1
-                    stats["per_keyword"][kw] += 1
-                    stats["per_source"][source_name] += 1
+                        art["engines"] = art["engine"]
+                        # 指标与地区标识（单值列取"首个命中"的指标，便于简单聚合；
+                        # 全量归属在 indicators 里）
+                        art["level1_code"] = plan["level1_code"]
+                        art["level1_name"] = plan["level1_name"]
+                        art["level2_code"] = plan["level2_code"]
+                        art["level2_name"] = plan["level2_name"]
+                        art["level3_code"] = plan["level3_code"]
+                        art["level3_name"] = plan["level3_name"]
+                        art["unit"] = plan["unit"]
+                        art["region_code"] = plan["region_code"]
+                        art["region_name"] = plan["region_name"]
+                        art["indicators"] = tag
 
-                print(f"获取 {len(articles)} 条，新增 {new_count} 条")
-                # 每页间隔按源给定：只有会被限流的源才需要长间隔
-                dmin, dmax = cfg.DELAY_BY_SOURCE.get(source_name,
-                                                     cfg.DELAY_DEFAULT)
-                random_delay(dmin, dmax)
+                        # 可选：解析真实URL
+                        if resolve_url:
+                            art["real_url"] = resolve_real_url(art["url"], session)
+                            time.sleep(random.uniform(RESOLVE_DELAY * 0.7,
+                                                      RESOLVE_DELAY * 1.3))
 
-            if not source_failed:
-                stats["ok_by_source"][source_name] += 1
-                # 该源该检索式成功采完 → 边采边记入台账（崩溃/中断也不丢）
-                if progress_path:
-                    append_progress(progress_path, [(
-                        source_name, plan_key, "ok",
-                        time.strftime("%Y-%m-%d %H:%M:%S"))])
+                        by_id[art_id] = art
+                        new_count += 1
+                        stats["per_keyword"][kw] += 1
+                        stats["per_source"][source_name] += 1
 
-        if idx < total:
-            extra = random.uniform(2.0, 5.0)
-            print(f"  [暂停 {extra:.1f}s 后继续]")
-            time.sleep(extra)
+                    print(f"获取 {len(articles)} 条，新增 {new_count} 条")
+                    source_new += new_count
+                    # 每页间隔按源给定：只有会被限流的源才需要长间隔
+                    dmin, dmax = cfg.DELAY_BY_SOURCE.get(source_name,
+                                                         cfg.DELAY_DEFAULT)
+                    random_delay(dmin, dmax)
 
+                if not source_failed:
+                    stats["ok_by_source"][source_name] += 1
+                    # 成功采完 → 排队记台账；等本条检索式的数据落盘后再写（见 _flush_and_log）
+                    pending_progress.append((
+                        source_name, plan_key, "ok", source_new,
+                        time.strftime("%Y-%m-%d %H:%M:%S")))
+
+            # 一条检索式采完：先把数据落盘，再写台账（台账 ⟸ 数据，中断也不谎报完成）
+            _flush_and_log()
+
+            if idx < total:
+                extra = random.uniform(2.0, 5.0)
+                print(f"  [暂停 {extra:.1f}s 后继续]")
+                time.sleep(extra)
+    except KeyboardInterrupt:
+        interrupted = True
+        print("\n[中断] 收到 Ctrl-C，正在把已采数据落盘 ...")
+        _flush_and_log()
+
+    stats["interrupted"] = interrupted
     return list(by_id.values()), stats
 
 
@@ -685,6 +712,34 @@ def run_once(run_dir, paths, accumulator, plans, enabled_sources=None,
     if progress_path and not fresh:
         print(f"续跑台账：{progress_path}（已成功的检索式将跳过；--fresh 可忽略）")
 
+    # 累积总库"采集前"行数：用于算净新增。增量落盘会反复改写总库，故基准必须此刻取。
+    before = csv_row_count(accumulator)
+    state = {"delta": None, "merged": None, "n": 0}
+
+    def flush(items):
+        """把当前已采的全部条目落盘：本轮增量 + 累积快照 + 累积总库 + 链接清单。
+
+        采集过程中被反复调用（每条检索式一次），因此中断也**不丢已采数据**；
+        `crawl_all_keywords` 保证"先 flush 成功、再记台账"，台账不会领先数据。
+        """
+        if not items:
+            return
+        delta = clean_dataframe(pd.DataFrame(items))
+        # 累积总库仍在顶层：跨轮累积基准，不受某轮崩掉影响
+        merged = merge_with_existing(delta.copy(), accumulator,
+                                     accumulate=cfg.ACCUMULATE)
+        merged = backfill_legacy_engine(merged)
+        delta = order_columns(delta)
+        merged = order_columns(merged)
+        delta.to_csv(paths["delta"], index=False, encoding="utf-8-sig")
+        merged.to_csv(paths["cumulative"], index=False, encoding="utf-8-sig")
+        merged.to_csv(accumulator, index=False, encoding="utf-8-sig")
+        export_link_list(merged, paths["links"])
+        export_url_mapping(merged, paths["url_map"])
+        state["delta"], state["merged"], state["n"] = delta, merged, len(delta)
+        print(f"    [增量落盘] 本轮累计 {len(delta)} 条 → {os.path.basename(paths['delta'])}"
+              f"（链接见 {os.path.basename(paths['links'])}）")
+
     raw, stats = crawl_all_keywords(
         plans,
         max_pages=cfg.MAX_PAGES_PER_KEYWORD,
@@ -692,11 +747,16 @@ def run_once(run_dir, paths, accumulator, plans, enabled_sources=None,
         enabled_sources=enabled_sources,
         progress_path=progress_path,
         fresh=fresh,
+        flush_cb=flush,
     )
 
     print_coverage(stats, len(plans))
 
-    if not raw:
+    if stats.get("interrupted"):
+        print("\n[中断] 已中断；**已采数据已随采集过程增量落盘**（不是跑完才写），"
+              "下次运行会跳过台账里已成功的检索式、只补缺口。")
+
+    if not raw or state["merged"] is None:
         print("\n[结果] 未采集到任何文章。")
         if stats["failed_pages"]:
             print(f"       原因：有 {stats['failed_pages']} 页采集失败"
@@ -708,29 +768,13 @@ def run_once(run_dir, paths, accumulator, plans, enabled_sources=None,
                   f"可放宽 is_relevant 或调整 NOISE_DOMAINS。")
         return
 
-    # 本轮增量（合并历史之前），与累积快照分开保存
-    before = csv_row_count(accumulator)
-    delta = clean_dataframe(pd.DataFrame(raw))
-
-    # 累积总库仍在顶层：它是跨轮累积基准。若改成"读上一轮目录"，一旦某轮
-    # 在写出前崩掉就会断链；顶层总库不受失败影响。
-    merged = merge_with_existing(delta.copy(), accumulator, accumulate=cfg.ACCUMULATE)
-    merged = backfill_legacy_engine(merged)
+    # 最终产物已在 flush 中落盘，这里取最后一次结果做汇总与预览
+    delta, merged = state["delta"], state["merged"]
     net_new = len(merged) - before
-
-    delta = order_columns(delta)
-    merged = order_columns(merged)
-
-    delta.to_csv(paths["delta"], index=False, encoding="utf-8-sig")
-    print(f"[输出] 本轮采集（去重清洗后）→ {paths['delta']}")
-
-    merged.to_csv(paths["cumulative"], index=False, encoding="utf-8-sig")
-    merged.to_csv(accumulator, index=False, encoding="utf-8-sig")
+    print(f"\n[输出] 本轮采集（去重清洗后）→ {paths['delta']}")
     print(f"[输出] 累积快照 → {paths['cumulative']}")
     print(f"[输出] 累积总库 → {accumulator}")
-
-    export_link_list(merged, paths["links"])
-    export_url_mapping(merged, paths["url_map"])
+    print(f"[输出] 链接清单 → {paths['links']}")
 
     print_quality_report(merged, stats)
 

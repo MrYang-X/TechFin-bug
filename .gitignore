@@ -30,3 +30,8 @@ __pycache__/
 # techfin_official.csv）仍纳入版本管理。
 # 模式匹配「四位年.月.日-次数」的目录名，与主题无关（A/A1、A/A2 均适用）。
 **/[0-9][0-9][0-9][0-9].[0-9]*.[0-9]*-[0-9]*/
+
+# 二级抓取正文缓存与 LLM 结果缓存：体积大（含附件二进制）且可再生，不纳入版本管理。
+# 数据点累积总库（techfin_a101_points.csv）与 LLM 调用审计（a101_llm_calls.jsonl）仍跟踪。
+A/A1/techfin_common_output/body_cache/
+A/A1/techfin_common_output/a101_llm_cache/

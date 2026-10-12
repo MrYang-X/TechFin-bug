@@ -187,6 +187,49 @@ def get_random_headers(referer="https://news.baidu.com/"):
     }
 
 
+def guess_encoding(resp):
+    """
+    从响应中探测正确编码，返回规范化编码名（如 "gb18030" / "utf-8"）。
+
+    搜索引擎源（百度/Bing/360）固定 UTF-8，旧版对此直接写死 resp.encoding="utf-8"
+    并无问题；但政府网站大量使用 GB2312/GBK，写死 UTF-8 会把正文解成乱码。
+    依次尝试：
+      1) HTTP 头 Content-Type 的 charset；
+      2) 响应体前 4KB 的 <meta charset> / <meta http-equiv="Content-Type">；
+      3) resp.apparent_encoding（底层 charset-normalizer，已随 requests 安装）；
+      4) 兜底 utf-8。
+
+    并把 gb2312/gbk/gb18030 统一归到 **gb18030**——它是 GBK/GB2312 的超集，
+    能解全部简体旧编码，避免"用 GB2312 去解 GBK 出乱码"。头里常见错误声明
+    latin-1/iso-8859-1 的中文页，则改交给自动猜测。
+    """
+    # 1) HTTP 头
+    ctype = resp.headers.get("Content-Type", "") or ""
+    m = re.search(r"charset=[\"']?([\w-]+)", ctype, re.I)
+    enc = m.group(1) if m else None
+
+    # 2) HTML meta（同时覆盖 <meta charset="gbk"> 与 content="text/html; charset=gbk"）
+    if not enc:
+        head = (resp.content or b"")[:4096]
+        m = re.search(rb"charset=[\"']?([\w-]+)", head, re.I)
+        if m:
+            enc = m.group(1).decode("ascii", "ignore")
+
+    # 3) 自动猜测（charset-normalizer）
+    if not enc:
+        enc = resp.apparent_encoding
+
+    # 4) 兜底
+    enc = (enc or "utf-8").strip().lower()
+
+    if enc in ("gb2312", "gbk", "gb18030"):
+        return "gb18030"
+    if enc in ("iso-8859-1", "latin-1", "latin1", "windows-1252"):
+        # 对中文页这是常见的错误声明，交给自动猜测
+        return (resp.apparent_encoding or "utf-8").lower()
+    return enc
+
+
 def random_delay(min_delay, max_delay):
     """采集节奏由主题配置决定，故不设默认值（旧版的模块级默认已移除）"""
     time.sleep(random.uniform(min_delay, max_delay))
@@ -554,15 +597,17 @@ def load_progress(path):
 
 def append_progress(path, rows):
     """
-    追加若干 (source, plan_key, status, ts) 到台账（不存在则建表头）。
+    追加若干 (source, plan_key, status, n_items, ts) 到台账（不存在则建表头）。
 
     逐批落盘而非收尾统一写：某源中途被限流、整轮被 Ctrl-C 时，已完成的记录
-    不会丢——这正是断点续跑最需要的性质。
+    不会丢——这正是断点续跑最需要的性质。`n_items` 是该源该检索式本次新增的
+    条数，便于人工核对"跑到哪、有多少"（台账本身不是数据文件，数据在
+    search_delta.csv / search_links.txt）。
     """
     if not rows:
         return
     header = not os.path.exists(path)
-    df = pd.DataFrame(rows, columns=["source", "plan_key", "status", "ts"])
+    df = pd.DataFrame(rows, columns=["source", "plan_key", "status", "n_items", "ts"])
     df.to_csv(path, mode="a", header=header, index=False, encoding="utf-8-sig")
 
 
