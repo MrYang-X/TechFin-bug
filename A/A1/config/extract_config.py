@@ -67,7 +67,7 @@ AMBIGUOUS_REGION_NAMES = {"城区"}
 LLM_MODEL = "claude-sonnet-5-5"
 LLM_EFFORT = "medium"
 LLM_MAX_TOKENS = 8000
-PROMPT_VERSION = "a101-v1"
+PROMPT_VERSION = "a101-v2"      # 改 prompt/规则即 bump（v2：补强 stat_year 口径指引）
 
 # LLM 触发模式：
 #   "any_indicator" —— 只要某篇提到 A101 指标词就调 LLM（精度优先；规则层仅作交叉印证，
@@ -101,7 +101,7 @@ LLM_SCHEMA = {
                     "value": {"type": ["number", "null"], "description": "归一化数值，'万'需×10000；无数值填 null"},
                     "value_text": {"type": "string", "description": "原文数字串，如 '1.2万家'"},
                     "unit": {"type": "string", "enum": ["家", "家/万人", "%", "户", "个", ""]},
-                    "stat_year": {"type": ["integer", "null"], "description": "数据所属年份；不确定填 null"},
+                    "stat_year": {"type": ["integer", "null"], "description": "数据所属年份：正文有'截至XXXX年底/XXXX年度/XXXX年末'就用该年；'今年/去年/当年'按文章发布日期换算；都没有填 null"},
                     "stat_period": {"type": "string", "description": "口径时点，如 '年末' '截至2024年6月' '2024年'"},
                     "context_type": {"type": "string",
                                      "enum": ["actual", "planned", "target", "decline", "unknown"],
@@ -126,7 +126,8 @@ SYSTEM_PROMPT = """你是严谨的数据抽取助手，任务是从中国政府/
    - decline：减少/注销/取消/迁出/净减
    - unknown：无法判断
 3. region_code 尽量给出六位行政区划码（广东省县级如 440103=广州荔湾）；拿不准就填空串，并在 region_name 写文中地区名。
-4. stat_year 是【数据所指的年份】，不是文章发布日期；文中没有年份就填 null。
+4. stat_year 是【数据所指的年份】，不是文章发布日期：正文有"截至XXXX年底""XXXX年度""XXXX年末"就用那个年；
+   "今年/去年/当年"这类相对表述，按文章的发布日期换算成具体年；都没有才填 null。
 5. evidence_snippet 必须是原文片段，供人工核对。
 6. 若某句只是在谈政策、名单、申报流程而没有具体数量，就不要产出数据点。
 
@@ -169,7 +170,7 @@ POINT_COLS = [
     "level1_code", "level1_name", "level2_code", "level2_name",
     "level3_code", "level3_name",
     "metric", "region_code", "region_name", "region_level", "city_name", "region_from",
-    "value_num", "value_text", "unit", "stat_year", "stat_period",
+    "value_num", "value_text", "unit", "stat_year", "stat_period", "stat_year_src",
     "context_type", "context_cue",
     "evidence_snippet", "evidence_source", "evidence_locator",
     "extract_method", "confidence", "llm_model", "llm_prompt_version", "extract_time",
@@ -180,7 +181,7 @@ POINT_COLS = [
 # index_value/data_quality/data_source/evidence_ref）。
 RESOLVED_COLS = [
     "region_code", "region_name", "city_name",
-    "level3_code", "level3_name", "metric", "stat_year",
+    "level3_code", "level3_name", "metric", "stat_year", "stat_year_src",
     "canonical_value", "n_sources", "n_support", "source_article_ids",
     "value_min", "value_max", "agreement", "chosen_reason", "authority",
     "data_quality", "data_source",

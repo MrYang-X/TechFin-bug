@@ -32,16 +32,22 @@ from pathlib import Path
 import pandas as pd
 
 # ---- 引导：通用工具在仓库根，本脚本在 A/A1/ ----
+# 向上找两个锚点：仓库根（crawler_common.py）与主题目录（config/topic_config.py）。
+# 脚本进了子目录后，"脚本自身目录"不再是配置所在，故必须显式定位这两处。
+_REPO_ROOT = _TOPIC_DIR = None
 for _p in Path(__file__).resolve().parents:
-    if (_p / "crawler_common.py").exists():
-        sys.path.insert(0, str(_p))
+    if _REPO_ROOT is None and (_p / "crawler_common.py").exists():
+        _REPO_ROOT = _p
+    if _TOPIC_DIR is None and (_p / "config" / "topic_config.py").exists():
+        _TOPIC_DIR = _p
+    if _REPO_ROOT and _TOPIC_DIR:
         break
-else:
-    raise RuntimeError("找不到 crawler_common.py，请确认它位于仓库根目录")
+if not (_REPO_ROOT and _TOPIC_DIR):
+    raise RuntimeError("找不到 crawler_common.py（仓库根）或 config/topic_config.py（主题目录）")
+sys.path.insert(0, str(_REPO_ROOT))             # → crawler_common
+sys.path.insert(0, str(_TOPIC_DIR / "config"))  # → topic_config / extract_config
 
-_HERE = str(Path(__file__).resolve().parent)
-if _HERE not in sys.path:
-    sys.path.insert(0, _HERE)
+# （配置目录已由上面的主题目录引导加入 sys.path）
 
 import topic_config as cfg       # noqa: E402
 import extract_config as ec      # noqa: E402
@@ -195,7 +201,7 @@ def _min_distance(sent, term, pos):
 
 def _make_point(article, meta, region, value_num, value_text, unit, metric,
                 stat_year, stat_period, ctype, cue, snippet, locator,
-                method, confidence, llm=None):
+                method, confidence, llm=None, year_src=""):
     code, name, level, city, rfrom = region
     return {
         "article_id": article.get("article_id", ""),
@@ -217,7 +223,7 @@ def _make_point(article, meta, region, value_num, value_text, unit, metric,
         "region_code": code, "region_name": name, "region_level": level,
         "city_name": city, "region_from": rfrom,
         "value_num": value_num, "value_text": value_text, "unit": unit or "",
-        "stat_year": stat_year, "stat_period": stat_period,
+        "stat_year": stat_year, "stat_period": stat_period, "stat_year_src": year_src,
         "context_type": ctype, "context_cue": cue,
         "evidence_snippet": snippet[:300],
         "evidence_source": locator[0], "evidence_locator": locator[1],
@@ -236,20 +242,66 @@ def authority_of(meta):
 
 
 _YEAR_RE = re.compile(r"((?:19|20)\d{2})\s*年")
+_YEAR_PERIOD_RE = re.compile(r"((?:19|20)\d{2})\s*年(?:度|底|末|初|上半|下半|全年)")
+_REL_TOKENS = ("去年", "上年", "上年度", "今年", "当年", "本年度", "同期")
 
 
-def _guess_year(sent, window):
-    m = _YEAR_RE.search(sent) or _YEAR_RE.search(window)
+def _pub_year(meta):
+    """文章发布日期的年份（无则 None）。"""
+    m = re.match(r"(\d{4})", str(meta.get("date", "") or ""))
     return int(m.group(1)) if m else None
 
 
-def extract_sentence(sent, window, offset, label, article, meta, idx):
+def _rel_year(token, meta):
+    """相对表述 → 具体年份（按发布年换算）；无发布年返回 None。"""
+    py = _pub_year(meta)
+    if py is None:
+        return None
+    return py - 1 if token in ("去年", "上年", "上年度") else py
+
+
+def infer_stat_year(sent, window, meta, doc_text=""):
+    """
+    推断数据点所属【数据年份】，返回 (year|None, src)。src 标明年份来源，供下游审计/加权：
+      period   口径短语（"截至2024年底""2024年度""2024年末"）——比裸年更具体，先判
+      text     句内显式年（"2024年新增…"）
+      relative 相对表述（今年/去年…，按发布日期换算）
+      window   邻句（±1 句）里的年
+      doc      全文最近的年
+      article  回退文章发布年（低置信，下游可加权/剔除）
+      none     都没有
+    """
+    m = _YEAR_PERIOD_RE.search(sent)
+    if m:
+        return int(m.group(1)), "period"
+    m = _YEAR_RE.search(sent)
+    if m:
+        return int(m.group(1)), "text"
+    for tok in _REL_TOKENS:
+        if tok in sent:
+            y = _rel_year(tok, meta)
+            if y:
+                return y, "relative"
+    m = _YEAR_RE.search(window)
+    if m:
+        return int(m.group(1)), "window"
+    if doc_text:
+        m = _YEAR_RE.search(doc_text)
+        if m:
+            return int(m.group(1)), "doc"
+    y = _pub_year(meta)
+    if y:
+        return y, "article"
+    return None, "none"
+
+
+def extract_sentence(sent, window, offset, label, article, meta, idx, doc_text=""):
     """对单个含指标词的句子跑规则匹配，返回数据点列表。"""
     term = find_indicator(sent)
     points = []
     ctype, cue = classify_context(sent)
     region = map_region(sent, meta, idx)
-    year = _guess_year(sent, window)
+    year, ysrc = infer_stat_year(sent, window, meta, doc_text)
     period = f"{year}年" if year else ""
     src = ("body", f"char:{offset}") if label == "body" else (label, "")
 
@@ -270,7 +322,8 @@ def extract_sentence(sent, window, offset, label, article, meta, idx):
             conf -= 0.15
         points.append(_make_point(
             article, meta, region, val, vtext, unit, _metric_of(unit),
-            year, period, ctype, cue, sent, src, "rule", max(conf, 0.2)))
+            year, period, ctype, cue, sent, src, "rule", max(conf, 0.2),
+            year_src=ysrc))
 
     # "近/超/逾/约 N 家"：数值保留、标记近似
     for m in ec.APPROX_RE.finditer(sent):
@@ -280,7 +333,7 @@ def extract_sentence(sent, window, offset, label, article, meta, idx):
         points.append(_make_point(
             article, meta, region, _num_value(m.group("num"), None),
             m.group(0).strip(), m.group("unit"), _metric_of(m.group("unit")),
-            year, period, ctype, cue, sent, src, "rule", 0.5))
+            year, period, ctype, cue, sent, src, "rule", 0.5, year_src=ysrc))
 
     return points
 
@@ -307,9 +360,11 @@ def collect_sources(article):
 def rule_extract_article(article, idx):
     """规则层抽一篇文章。返回 (points, windows, indicator_sents 数)。"""
     meta = article.get("meta", {}) or {}
+    sources = collect_sources(article)
+    doc_text = "\n".join(t for _, t in sources)[:20000]   # 全文，供年份回退
     points, windows = [], []
     n_ind_sents = 0
-    for label, text in collect_sources(article):
+    for label, text in sources:
         sents = split_sentences(text)
         for i, (s, off) in enumerate(sents):
             if not find_indicator(s):
@@ -317,7 +372,7 @@ def rule_extract_article(article, idx):
             n_ind_sents += 1
             window = " ".join(x for x, _ in sents[max(0, i - 1):i + 2])
             windows.append(window)
-            points.extend(extract_sentence(s, window, off, label, article, meta, idx))
+            points.extend(extract_sentence(s, window, off, label, article, meta, idx, doc_text))
     return points, windows, n_ind_sents
 
 
@@ -426,7 +481,8 @@ def llm_points(data, article, meta, idx):
             dp.get("stat_year"), str(dp.get("stat_period", "") or ""),
             dp.get("context_type", "unknown"), str(dp.get("context_cue", "") or ""),
             str(dp.get("evidence_snippet", "") or ""),
-            ("body", ""), "llm", float(dp.get("confidence", 0.6) or 0.6), llm=llm))
+            ("body", ""), "llm", float(dp.get("confidence", 0.6) or 0.6), llm=llm,
+            year_src=("llm" if dp.get("stat_year") else "none")))
     return out
 
 
@@ -510,6 +566,7 @@ def resolve_points(points):
             "city_name": g["city_name"].iloc[0],
             "level3_code": l3, "level3_name": g["level3_name"].iloc[0],
             "metric": metric, "stat_year": year,
+            "stat_year_src": chosen.get("stat_year_src", ""),
             "canonical_value": chosen["value_num"] if len(actual) else "",
             "n_sources": len(aids),
             "n_support": len(actual),
@@ -706,7 +763,7 @@ def parse_args(argv=None):
 
 def main(argv=None):
     args = parse_args(argv)
-    topic_dir = Path(__file__).resolve().parent
+    topic_dir = _TOPIC_DIR
     out_root = resolve_output_root(topic_dir, cfg.OUTPUT_ROOT, args.output_dir)
     cache_dir = str(out_root / cfg.BODY_CACHE_DIR)
 

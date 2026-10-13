@@ -47,16 +47,22 @@ from bs4 import BeautifulSoup
 
 # ---- 引导：通用工具在仓库根，而本脚本在 A/A1/。Python 只把【脚本自身目录】
 # ---- 放进 sys.path，父目录不会自动可见，故向上逐级找 crawler_common.py。
+# 向上找两个锚点：仓库根（crawler_common.py）与主题目录（config/topic_config.py）。
+# 脚本进了子目录后，"脚本自身目录"不再是配置所在，故必须显式定位这两处。
+_REPO_ROOT = _TOPIC_DIR = None
 for _p in Path(__file__).resolve().parents:
-    if (_p / "crawler_common.py").exists():
-        sys.path.insert(0, str(_p))
+    if _REPO_ROOT is None and (_p / "crawler_common.py").exists():
+        _REPO_ROOT = _p
+    if _TOPIC_DIR is None and (_p / "config" / "topic_config.py").exists():
+        _TOPIC_DIR = _p
+    if _REPO_ROOT and _TOPIC_DIR:
         break
-else:
-    raise RuntimeError("找不到 crawler_common.py，请确认它位于仓库根目录")
+if not (_REPO_ROOT and _TOPIC_DIR):
+    raise RuntimeError("找不到 crawler_common.py（仓库根）或 config/topic_config.py（主题目录）")
+sys.path.insert(0, str(_REPO_ROOT))             # → crawler_common
+sys.path.insert(0, str(_TOPIC_DIR / "config"))  # → topic_config / extract_config
 
-_HERE = str(Path(__file__).resolve().parent)
-if _HERE not in sys.path:
-    sys.path.insert(0, _HERE)
+# （配置目录已由上面的主题目录引导加入 sys.path）
 
 import topic_config as cfg  # noqa: E402
 from crawler_common import (  # noqa: E402
@@ -732,7 +738,7 @@ def parse_args(argv=None):
 
 def main(argv=None):
     args = parse_args(argv)
-    topic_dir = Path(__file__).resolve().parent
+    topic_dir = _TOPIC_DIR
     out_root = resolve_output_root(topic_dir, cfg.OUTPUT_ROOT, args.output_dir)
     cache_dir = str(out_root / cfg.BODY_CACHE_DIR)
 

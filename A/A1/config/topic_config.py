@@ -844,6 +844,21 @@ CURATED_DROPPED = "curated_dropped.csv"       # 被剔除条目（含原因，�
 CURATED_PREFIX = "curated_"                   # ④ 每轮产物前缀（curated_log / curated_report.md ...）
 
 
+# ---- ⑤ OCR 补全（扫描件附件）契约与参数 ----
+# techfin_ocr.py 读 body_cache、给扫描件 PDF 补 OCR 并写回缓存。纯本地、不发网络请求。
+OCR_ENABLED = True
+OCR_LANG = "ch"                # PaddleOCR 语言/模型族
+OCR_VERSION = "PP-OCRv5"       # 模型版本
+# 用 mobile 轻量模型：server 版检测/识别在 CPU 上极慢（实测单页数十秒~分钟），
+# mobile 版实测单页 ~4s、识别质量足够，故默认 mobile。
+OCR_DET_MODEL = "PP-OCRv5_mobile_det"
+OCR_REC_MODEL = "PP-OCRv5_mobile_rec"
+OCR_DEVICE = "cpu"             # 本机无 CUDA；有 GPU 可改 "gpu"
+OCR_DPI = 200                  # PDF 渲染分辨率（越大越准越慢）
+OCR_MAX_PAGES = 50             # 单个附件最多 OCR 的页数（防超大件拖垮）
+OCR_PREFIX = "ocr_"            # ⑤ 每轮产物前缀（ocr_log / ocr_index.csv）
+
+
 # 印证报告文件名
 REPORT_NAME = "corpus_verification.md"
 

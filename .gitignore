@@ -33,5 +33,9 @@ __pycache__/
 
 # 二级抓取正文缓存与 LLM 结果缓存：体积大（含附件二进制）且可再生，不纳入版本管理。
 # 数据点累积总库（techfin_a101_points.csv）与 LLM 调用审计（a101_llm_calls.jsonl）仍跟踪。
-A/A1/techfin_common_output/body_cache/
-A/A1/techfin_common_output/a101_llm_cache/
+A/A1/techfin_common_output
+
+# clone的仓库的.git文件夹，避免冲突
+**/.git
+/PaddleOCR/**/.git
+/PaddleOCR/
