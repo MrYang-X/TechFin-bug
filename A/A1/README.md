@@ -12,8 +12,7 @@
 
 ## (a) 各 py 的依赖关系
 
-**没有任何脚本互相 import。** 各脚本是对等关系，只通过**文件**耦合——
-这点最容易误解，所以先把依赖图看清楚。
+没有任何脚本互相 import。 各脚本是对等关系，只通过文件耦合
 
 ```
 crawler_common.py      （仓库根；叶子模块：通用工具，不 import 任何本地模块）
@@ -102,8 +101,9 @@ report/verify_corpus.py           ──读①②─→ 两个累积总库 ─�
 ```bash
 cd E:\Python\bug\A\A1
 
-# —— 一键按序跑（推荐入口；默认只跑处理链，--collect 才跑采集器）——
-python run_all.py                     # fetch→ocr→clean→extract→verify
+# —— 一键按序跑（推荐入口；无参数进交互菜单，带参数则按参数执行）——
+python run_all.py                     # 无参数 → 交互菜单；一路回车 = 默认处理链
+python run_all.py --no-prompt         # 跳过菜单，直接跑默认处理链（脚本/CI）
 python run_all.py --collect           # 先跑两个采集器，再跑处理链
 python run_all.py --list              # 只看将执行哪些步
 
@@ -129,6 +129,12 @@ python extract/techfin_extract_points.py --extractor rule     # 只跑规则层�
 python extract/techfin_extract_points.py --extractor hybrid   # 规则 + LLM 兜底（默认，需 Claude API）
 python report/verify_points.py                                # 数据点质量报告
 ```
+
+> **无参数 = 交互菜单**：对 7 个步骤逐个询问 y/n，直接回车采用方括号内默认值
+> （fetch/ocr/clean/extract/verify 为 Y，两个采集器为 N），因此一路回车与原有的默认处理链完全等价。
+> 菜单末尾可再选择"只打印计划"（等价 `--list`）与统一的 `--limit N`；全部选 N 会直接取消。
+> **带任意命令行参数时不会进入菜单**，行为与以前一致；脚本/CI 可加 `--no-prompt` 强制跳过菜单。
+> Ctrl+C 或输入 EOF 会取消且不执行任何步骤。
 
 > **②③④ 与①的关系**：② 读 ① 的累积总库、写正文缓存；④ 读 ①②、写清洗清单；③ 读正文缓存 + 清洗清单、写数据点。
 > 顺序 ①→②→④→③；②③④ 各自可独立反复重跑（② 靠缓存跳过已抓、③ 靠 LLM 缓存跳过已调、④ 全量幂等重算）。
@@ -314,6 +320,8 @@ techfin_common_output/
 - **性能**：默认用 **mobile 轻量模型**（server 版在 CPU 上单页数十秒~分钟，mobile 实测 ~4s/页）；
   `OCR_MAX_PAGES` 限单附件页数（防超大件）。CPU 慢是常态，靠"只处理扫描件 + 只跑一次 + 缓存"控成本。
 - **依赖**：`pip install paddleocr paddlepaddle pypdfium2`（本机已装）；缺则脚本给出中文提示。
+- **配置原理、踩坑与换机迁移**：见 [`OCR配置与排错.md`](OCR配置与排错.md)（含 3.x ↔ 2.x API 对照与排错对照表）；
+  依赖版本清单见仓库根 [`requirements.txt`](../../requirements.txt)。
 
 ### ⑥ 评估闭环（`report/techfin_eval.py`）
 
