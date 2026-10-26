@@ -16,7 +16,51 @@
 本机（Windows 11 + Python venv）装的是 **CPU 版 `paddlepaddle` wheel**, `is_compiled_with_cuda()` 返回 `False`. 因此:
 
 - `OCR_DEVICE = "cpu"`（`topic_config.py:856`）
-- 选型、页数上限、DPI 这些参数**全部围绕"CPU 很慢"这个约束来定**（见 §3、§5）
+- 选型、页数上限、DPI 这些参数**全部围绕"CPU 很慢"这个约束来定**
+
+### 1.1 安装 PaddleOCR Python 库及可选依赖项
+
+Python 版本要求: `paddleocr` 本体与 `doc2md` 依赖组支持 Python 3.8 及以上; 其他可选依赖组(`doc-parser`、`ie`、`trans`、`all`等)需要 Python 3.9 及以上.
+我在此处使用的版本为 Python 3.13
+
+#### 1.1.1 安装 `paddleocr`
+
+从 PyPI 安装最新版本的 `paddleocr`: 
+```powershell
+# 仅需要通用 OCR 与文档图像预处理等默认能力
+# python -m pip install paddleocr
+# 需要文档解析、文档理解、文档翻译、关键信息抽取等全部可选能力
+# 推荐安装所有可选项
+python -m pip install "paddleocr[all]"
+```
+
+#### 1.1.2 按功能选择依赖组
+
+`paddleocr` 可通过指定依赖组启用部分可选能力.
+在此不作赘述, 可自行查阅文档 https://www.paddleocr.ai/main/version3.x/installation.html#install-paddleocr
+
+#### 1.1.3 安装推理引擎(按需)
+
+PaddleOCR 3.5 引入了统一的推理引擎配置方式: 使用 engine 选择底层推理引擎, 使用 engine_config 传递该引擎的专属配置. 无论是单模型还是产线, 均可按这套方式声明推理行为
+
+如果不显式指定 engine, 默认行为与旧版本保持一致: 除高性能推理功能和生成式 AI 客户端请求功能等少数场景外, 大多数情况下会优先使用飞桨框架推理;
+如果显式指定 engine, 则会优先按指定引擎初始化
+
+**PaddleOCR 当前支持的推理模型**
+
+| 引擎类别         | `engine`取值                                  | 说明                              |
+| ------------ | ------------------------------------------- | ------------------------------- |
+| 飞桨框架         | `paddle`、 `paddle_static`、 `paddle_dynamic` | 基于飞桨框架运行                        |
+| Transformers | `transformers`                              | 基于 Hugging Face Transformers 运行 |
+| ONNX Runtime | `onnxruntime`                               | 基于 ONNX Runtime 运行              |
+
+- `paddle`: 飞桨框架统一入口. 根据模型类型和模型目录中的文件选择 `paddle_static` 或 `paddle_dynamic`, 在二者都可用的情况下偏好 `paddle_static`
+- `paddle_static`: 飞桨静态图推理，适合对推理性能有一定要求或者需要进行精细化推理性能调优的场景
+- `paddle_dynamic`: 飞桨动态图推理，相比静态图更加灵活、易于调试
+- `transformers`: Hugging Face Transformers 推理，便于与 Hugging Face 生态集成
+- `onnxruntime`: ONNX Runtime 推理，用于加载并执行 ONNX 格式模型
+
+**各推理引擎安装方式**
 
 由于CPU 版 wheel 里没有 CUDA kernel, 若想启用 GPU, 必须先卸载 CPU 版再重装 GPU 版. 再将配置项设为 `device="gpu"` 就行.
 
