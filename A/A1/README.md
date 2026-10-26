@@ -2,8 +2,9 @@
 
 本目录是一个**完整自洽的采集主题**，脚本按功能分目录：
 `config/`（配置）· `collect/`（① 采集）· `fetch/`（② 抓取 + ⑤ OCR）· `clean/`（④ 清洗）·
-`extract/`（③ 抽取）· `report/`（印证 / 质量 / 评估）。流水线 **① → ② → ⑤ → ④ → ③**，
-产物全部落在本目录下的输出根 `techfin_common_output/`；`run_all.py` 可按序一键跑。
+`extract/`（③ 抽取）· `report/`（印证 / 质量 / 评估）· `load/`（⑦ 可选入库）。
+流水线 **① → ② → ⑤ → ④ → ③**，⑦ 是可选后处理；产物全部落在本目录下的输出根
+`techfin_common_output/`；`run_all.py` 可按序一键跑主链。
 
 通用的爬虫机械（目录分配、日志、日期解析、清洗、导出、累积合并）在**仓库根**
 的 `crawler_common.py`，与主题无关，不要在本目录里复制一份。
@@ -27,6 +28,7 @@ config/extract_config.py  （叶子模块：③ 的抽取规则/地区别名/LLM
         ├── fetch/techfin_ocr.py               ⑤ OCR 补全：给扫描件 PDF 补文本
         ├── clean/techfin_curate.py            ④ 语料清洗/提纯（读①②，写 curated_*）
         ├── extract/techfin_extract_points.py  ③ 数值抽取：规则 + LLM
+        ├── load/techfin_load_to_db.py         ⑦ CSV → MySQL 入库（读 ③ + db/，可选后处理）
         ├── report/verify_points.py            ③验 数据点质量报告（只读）
         └── report/techfin_eval.py             ⑥ 评估闭环：标注模板 + precision/recall（只读）
 ```
@@ -54,6 +56,9 @@ clean/techfin_curate.py           ──读①②─→ 累积总库 + body_cach
 extract/techfin_extract_points.py ──读②④─→ body_cache/ + curated_corpus.csv
                                   ──写──→ <OUT_ROOT>/techfin_a101_points.csv（证据级，跨轮累积）
                                            <OUT_ROOT>/<日期-次数>/points_resolved.csv（聚合级）
+load/techfin_load_to_db.py        ──读③④─→ points_resolved.csv + techfin_a101_points.csv + curated_corpus.csv
+                                  ──写──→ MySQL fact_index_value（可选后处理）
+                                           <最新运行目录>/load_report.md / load_errors.csv / load_log
 report/verify_points.py           ──读③──→ 数据点 CSV ──写──→ <最新运行目录>/points_validation.md
 report/verify_corpus.py           ──读①②─→ 两个累积总库 ──写──→ <最新运行目录>/corpus_verification.md
 ```
@@ -87,6 +92,7 @@ report/verify_corpus.py           ──读①②─→ 两个累积总库 ─�
 | `fetch/techfin_ocr.py` | ⑤ OCR 补全：给扫描件 PDF 补文本（本地 PaddleOCR） | ② 正文缓存 | 写回 `body_cache/`（附件 `.txt` + JSON 字段） |
 | `clean/techfin_curate.py` | ④ 语料清洗/提纯：相关性 + 规范化 + 去重 + 分级 | ①②（累积总库 + 正文缓存） | `curated_corpus.csv` / `curated_uncertain.csv` / `curated_dropped.csv` |
 | `extract/techfin_extract_points.py` | ③ 数值抽取：规则 + LLM | ②④（正文缓存 + 清洗清单） | `techfin_a101_points.csv` + `points_resolved.csv` |
+| `load/techfin_load_to_db.py` | ⑦ CSV → MySQL 入库（可选后处理）：严格校验 + 幂等 upsert | ③ 证据/聚合级 + ④ 文章级 + `db/` 维度表 | MySQL `fact_index_value`；`load_report.md` / `load_errors.csv` / `load_log` |
 | `report/verify_corpus.py` | 交叉印证报告（只读，不采集） | ① 两份语料 | `corpus_verification.md` |
 | `report/verify_points.py` | ③验 数据点质量报告（只读） | ③ 数据点 CSV | `points_validation.md` |
 | `report/techfin_eval.py` | ⑥ 评估闭环：标注模板 + precision/recall 报告（只读） | ③ 数据点 CSV + ② 缓存 | `eval/label_precision.csv` / `eval/eval_report.md` |
@@ -128,6 +134,20 @@ python fetch/techfin_fetch_body.py --from-curated # ② 只抓 ④ 挑出的队�
 python extract/techfin_extract_points.py --extractor rule     # 只跑规则层（零 LLM 成本，可离线）
 python extract/techfin_extract_points.py --extractor hybrid   # 规则 + LLM 兜底（默认，需 Claude API）
 python report/verify_points.py                                # 数据点质量报告
+
+# —— ⑦ 数据入库/迁移（可选后处理；先执行仓库根 db/ 建库脚本）——
+pip install "PyMySQL[rsa]==1.1.2"                             # 或 pip install -r requirements.txt
+set TECHFIN_DB_PASSWORD=your_password                         # Windows；Linux/macOS 用 export
+python load/techfin_load_to_db.py --dry-run                    # 先预演，不写库
+python load/techfin_load_to_db.py                              # 写入默认库 techfin（最新一轮 resolved）
+python load/techfin_load_to_db.py --database techfin_test \
+    --host 127.0.0.1 --port 3306 --user root --ask-password    # 指定目标库（密码交互输入）
+python load/techfin_load_to_db.py \
+    --input-file techfin_common_output/2026.10.19-6/points_resolved.csv   # 指定输入
+python load/techfin_load_to_db.py --all-runs --only-level3 A101           # 合并所有轮次/只入 A101
+python load/techfin_load_to_db.py --allow-partial-batch                   # 当前数据可写入 1 行（2355）
+python load/techfin_load_to_db.py --self-test                             # 纯函数自测
+python load/techfin_load_to_db.py --dump-mapping                          # 查看指标口径/单位映射
 ```
 
 > **无参数 = 交互菜单**：对 7 个步骤逐个询问 y/n，直接回车采用方括号内默认值
@@ -250,7 +270,8 @@ techfin_common_output/
     ├── body_log / body_index.csv   ② fetch/techfin_fetch_body.py 本轮产物
     ├── ocr_log / ocr_index.csv     ⑤ fetch/techfin_ocr.py 本轮产物
     ├── curated_log / curated_report.md / curated_corpus.csv   ④ clean/techfin_curate.py 本轮产物
-    └── points_log / points_delta.csv / points_resolved.csv / points_validation.md   ③ / ③验
+    ├── points_log / points_delta.csv / points_resolved.csv / points_validation.md   ③ / ③验
+    └── load_log / load_report.md / load_errors.csv   ⑦ 可选入库（load/techfin_load_to_db.py）
 ```
 
 日志由脚本自己写（`*_log`），**不需要再用 shell 重定向 `> run.log`**；
@@ -337,6 +358,81 @@ techfin_common_output/
 **要点**：抽样 seed 固定（42），**改 prompt/规则后重跑同一抽样即可对比好坏**（配合 ③ 的 LLM 缓存）；
 改 prompt 时记得 **bump `extract_config.PROMPT_VERSION`**，否则 ③ 命中旧 LLM 缓存、改动不生效。
 
+### ⑦ CSV → MySQL 入库（可选后处理，`load/techfin_load_to_db.py`）
+
+**定位**：不属于默认主链。它需要数据库凭据、人工复核报告，**`run_all.py` 不会调用它**；
+主链产物准备好后手动执行。
+
+**前置**：
+
+1. 在仓库根按顺序执行数据库脚本：
+   `db/00_database.sql → 10_schema.sql → 20_seed_region.sql → 21_seed_index.sql → 40_staging.sql`
+   （详见 [`db/README.md`](../../db/README.md)）。
+2. 安装驱动：`pip install "PyMySQL[rsa]==1.1.2"`（已写入 `requirements.txt`）。
+3. 设置密码：`TECHFIN_DB_PASSWORD`，或运行时加 `--ask-password`。**不要把密码写进命令行或 README。**
+
+**输入**：
+
+- **主输入**：最新一个含 `points_resolved.csv` 的运行目录（当前是 `2026.10.19-6`，不是只有报告的 `-7`）。
+  `--input-file` 可指定文件，`--all-runs` 可合并所有轮次。
+- **证据级 sidecar**：同运行目录 `points_delta.csv` 或根 `techfin_a101_points.csv`，用于补
+  `unit`、`context_type`、`publish_date`、`evidence_snippet`。
+- **文章级 lookup**：`curated_corpus.csv`，用于补标题、来源、日期。
+- **不读**：`*_progress.csv`、`*_delta.csv`、`*_cumulative.csv`、`*_log`、`.md` 报告、
+  `*_links.txt`、`body_cache/**`；根目录与运行目录的 4 组完全重复文件只取一份。
+
+**严格过滤（默认）**：
+
+- 只入 `actual` + 有值 + 指标/单位匹配 + 非假阳性 + 地区一致的行；
+- **A103 默认阻断**：当前 23/23 个证据点都是 `count/家`，与 `share/%` 定义不符；
+  如未来有合法 A103（`share/%/actual/0—100`），用 `--allow-level3 A103` 显式放开；
+- 空值**不写 0**，默认跳过；`--include-missing` 才写 `obs_status='missing'`；
+- `planned/target/decline/unknown` 默认跳过；`--include-non-actual` 才写入；
+- 拒绝“10 个工作日”、服务企业/名单/孵化器假阳性、补充公布/更名/搬迁批次、
+  `全市/全省/其他区县/试验区` 等地区串区、`doc` 低置信年份；
+- 当前数据严格模式预期：**输入 20 → 通过 0 → 写入 0 → 拒绝 10 / 跳过 10**；
+  `--allow-partial-batch` 可写入 2355 这一行。
+
+**数据库与幂等**：
+
+- `--database` 默认 `techfin`；`--host/--port/--user` 可配；密码只从环境变量或交互读取。
+- 唯一键 `(region_code, year, level3_code, measure_code, context_type)`，
+  `INSERT ... ON DUPLICATE KEY UPDATE`；重复执行不会产生重复行。
+- `--upsert-policy overwrite|better|skip`：默认覆盖；`better` 只在质量不差于旧值时更新。
+- `missing` 行用 `ON DUPLICATE KEY UPDATE id=id`，**不会覆盖已有 present 行**。
+
+**单位**：存实际观测单位（家/户/万元/亿元/%），**不做跨单位换算**；`value_text` 保留原文；
+`standard_unit` 在 `dim_index_measure`，下游计算层需要时再归一化。
+
+**报告**：默认写入新建运行目录 `<YYYY.M.D-N>/`：
+
+```
+load_log
+load_report.md     漏斗、拒绝/跳过原因、写入明细、警告、复现命令
+load_errors.csv    row_no/error_code/error_detail/evidence_snippet/suggestion
+```
+
+**常用参数**：
+
+```bash
+python load/techfin_load_to_db.py --dry-run                 # 预演
+python load/techfin_load_to_db.py --limit 5                 # 只处理前 5 行
+python load/techfin_load_to_db.py --only-level3 A101        # 只入 A101
+python load/techfin_load_to_db.py --province-code 440000    # 只入广东
+python load/techfin_load_to_db.py --include-missing         # 空值写 missing
+python load/techfin_load_to_db.py --allow-partial-batch     # 放行补充公布/更名/搬迁批次
+python load/techfin_load_to_db.py --allow-approx            # 放行约数
+python load/techfin_load_to_db.py --allow-low-confidence-year
+python load/techfin_load_to_db.py --upsert-policy better
+python load/techfin_load_to_db.py --fail-on-error           # 有 hard 拒绝/DB 错误时退出 1
+python load/techfin_load_to_db.py --self-test               # 纯函数自测，不连库
+python load/techfin_load_to_db.py --dump-mapping            # 打印 DB 中的口径/单位映射
+```
+
+> 默认严格模式当前可能是 **0 行写入**——这是数据质量结论（A103 系统性错配、空值、
+> 假阳性、地区串区），不是脚本故障。先看 `load_report.md` 与 `load_errors.csv` 再决定
+> 是否用 `--allow-*` 放行。
+
 ---
 
 ## (c) 累积总库的更新时机与去重规则
@@ -381,12 +477,16 @@ unit / region_code / region_name / indicators` 这几列。**在这之前采的�
 ```
 搜索引擎每轮会把同样的头条再返回一遍，所以"采集 70 条"可能只带来"净新增 3 条"。
 
+**数据库入库（⑦）**：以 `(region_code, year, level3_code, measure_code, context_type)` 为幂等键
+`INSERT ... ON DUPLICATE KEY UPDATE`，重复跑不会产生重复行；`missing` 行只补空、
+**不会覆盖已有 present 行**。
+
 ---
 
 ## (d) 新增一个主题要做什么
 
 照抄本目录新建一个二级目录（如 `A/A2`），**复制整个 `A/A1` 目录结构**（各子目录
-`config/ collect/ fetch/ clean/ extract/ report/` + `run_all.py` + README），然后**只改四处**：
+`config/ collect/ fetch/ clean/ extract/ report/ load/` + `run_all.py` + README），然后**主要改以下五处**：
 
 1. **`config/topic_config.py`** —— 这是主要工作：
    - 官方源打标词：`AUTH_KEYWORDS`（官方源爬虫据此给条目打 `keyword` 标签与统计；
@@ -420,6 +520,9 @@ unit / region_code / region_name / indicators` 这几列。**在这之前采的�
 4. **`config/extract_config.py`**（③ 的抽取契约）：指标词族 `A101_TERMS`、数值/动词正则、
    地区别名 `REGION_ALIASES`、LLM 的 `SYSTEM_PROMPT` / `LLM_SCHEMA` / `LLM_MODEL` /
    `LLM_TRIGGER_MODE`。换指标（不只 A101）就改这里，改完重跑 ③ 即可、**不用重抓网页**。
+5. **`load/techfin_load_to_db.py`（可选）**：只改 `--database`/连接默认值与 `--block-level3` 策略；
+   指标/单位映射从目标库的 `dim_index_measure` 读取，不硬编码 A101/A103。新主题仍建议共用
+   仓库根的 `db/` schema，不要按主题复制一套数据库。
 
 **不需要碰 `crawler_common.py`。** 这正是把它拆出去的目的：通用机械一份，主题差异各管各的。
 不同主题的输出根互相独立，因此**当日序号互不干扰**（`resolve_run_dir` 只扫本主题的输出根，

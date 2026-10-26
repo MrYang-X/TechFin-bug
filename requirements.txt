@@ -30,3 +30,8 @@ requests==2.34.2
 # —— 数据处理与 LLM 抽取（③）——
 pandas==3.0.6
 anthropic==1.13.0
+
+# —— 数据库入库（⑦ 可选后处理）——
+# PyMySQL 纯 Python 驱动；[rsa] 额外拉 cryptography，兼容 MySQL 8 默认
+# caching_sha2_password（否则部分环境会报 “Authentication plugin ... cannot be loaded”）。
+PyMySQL[rsa]==1.1.2

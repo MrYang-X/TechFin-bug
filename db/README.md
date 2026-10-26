@@ -323,6 +323,11 @@ loader 必须做：
 5. CSV 用 `utf-8-sig` 读取（文件带 BOM）；
 6. `points_resolved.csv` 没有 `context_type` 和 `unit`，应以 `points_delta.csv` 为准，或在 loader 中标记 `unknown` 并拒绝进入 `v_index_actual`。
 
+> **已实现 loader**：`A/A1/load/techfin_load_to_db.py`。默认严格模式会阻断 A103、空值、
+> 假阳性和地区串区；先跑 `--dry-run`，查看 `load_report.md` / `load_errors.csv`，再决定是否
+> 用 `--allow-partial-batch` / `--include-missing` / `--include-non-actual` 放行。
+> 详细用法见 [`A/A1/README.md`](../A/A1/README.md) 的 ⑦ 小节。
+
 ---
 
 ## 9. 扩展省份
