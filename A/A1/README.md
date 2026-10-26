@@ -2,7 +2,7 @@
 
 本目录是一个**完整自洽的采集主题**，脚本按功能分目录：
 `config/`（配置）· `collect/`（① 采集）· `fetch/`（② 抓取 + ⑤ OCR）· `clean/`（④ 清洗）·
-`extract/`（③ 抽取）· `report/`（印证 / 质量 / 评估）· `load/`（⑦ 可选入库）。
+`extract/`（③ 抽取）· `report/`（印证 / 质量 / 评估）· `load/`（⑦ 可选入库 + 交互入口）。
 流水线 **① → ② → ⑤ → ④ → ③**，⑦ 是可选后处理；产物全部落在本目录下的输出根
 `techfin_common_output/`；`run_all.py` 可按序一键跑主链。
 
@@ -29,6 +29,7 @@ config/extract_config.py  （叶子模块：③ 的抽取规则/地区别名/LLM
         ├── clean/techfin_curate.py            ④ 语料清洗/提纯（读①②，写 curated_*）
         ├── extract/techfin_extract_points.py  ③ 数值抽取：规则 + LLM
         ├── load/techfin_load_to_db.py         ⑦ CSV → MySQL 入库（读 ③ + db/，可选后处理）
+        ├── load/techfin_load_to_db_interactive.py  ⑦ 交互式入口（菜单 + 子进程调用 loader）
         ├── report/verify_points.py            ③验 数据点质量报告（只读）
         └── report/techfin_eval.py             ⑥ 评估闭环：标注模板 + precision/recall（只读）
 ```
@@ -93,6 +94,7 @@ report/verify_corpus.py           ──读①②─→ 两个累积总库 ─�
 | `clean/techfin_curate.py` | ④ 语料清洗/提纯：相关性 + 规范化 + 去重 + 分级 | ①②（累积总库 + 正文缓存） | `curated_corpus.csv` / `curated_uncertain.csv` / `curated_dropped.csv` |
 | `extract/techfin_extract_points.py` | ③ 数值抽取：规则 + LLM | ②④（正文缓存 + 清洗清单） | `techfin_a101_points.csv` + `points_resolved.csv` |
 | `load/techfin_load_to_db.py` | ⑦ CSV → MySQL 入库（可选后处理）：严格校验 + 幂等 upsert | ③ 证据/聚合级 + ④ 文章级 + `db/` 维度表 | MySQL `fact_index_value`；`load_report.md` / `load_errors.csv` / `load_log` |
+| `load/techfin_load_to_db_interactive.py` | ⑦ 交互式入库入口：菜单询问数据库/输入/过滤/高级项，默认预演 | 用户输入 + loader | 子进程调用 loader；沿用其报告与错误清单 |
 | `report/verify_corpus.py` | 交叉印证报告（只读，不采集） | ① 两份语料 | `corpus_verification.md` |
 | `report/verify_points.py` | ③验 数据点质量报告（只读） | ③ 数据点 CSV | `points_validation.md` |
 | `report/techfin_eval.py` | ⑥ 评估闭环：标注模板 + precision/recall 报告（只读） | ③ 数据点 CSV + ② 缓存 | `eval/label_precision.csv` / `eval/eval_report.md` |
@@ -148,6 +150,7 @@ python load/techfin_load_to_db.py --all-runs --only-level3 A101           # 合�
 python load/techfin_load_to_db.py --allow-partial-batch                   # 当前数据可写入 1 行（2355）
 python load/techfin_load_to_db.py --self-test                             # 纯函数自测
 python load/techfin_load_to_db.py --dump-mapping                          # 查看指标口径/单位映射
+python load/techfin_load_to_db_interactive.py                             # 交互式菜单（默认预演）
 ```
 
 > **无参数 = 交互菜单**：对 7 个步骤逐个询问 y/n，直接回车采用方括号内默认值
@@ -428,6 +431,15 @@ python load/techfin_load_to_db.py --fail-on-error           # 有 hard 拒绝/DB
 python load/techfin_load_to_db.py --self-test               # 纯函数自测，不连库
 python load/techfin_load_to_db.py --dump-mapping            # 打印 DB 中的口径/单位映射
 ```
+
+**交互式入口**：不想记参数时运行：
+
+```bash
+python load/techfin_load_to_db_interactive.py
+```
+
+默认预演；逐步询问数据库、输入来源、过滤策略和高级选项；执行前显示完整 loader 命令并二次确认；
+密码用 `getpass` 或环境变量读取，不进入命令行；通过子进程调用 loader，报告里的复现命令准确。
 
 > 默认严格模式当前可能是 **0 行写入**——这是数据质量结论（A103 系统性错配、空值、
 > 假阳性、地区串区），不是脚本故障。先看 `load_report.md` 与 `load_errors.csv` 再决定

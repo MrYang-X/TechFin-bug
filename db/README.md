@@ -326,6 +326,7 @@ loader 必须做：
 > **已实现 loader**：`A/A1/load/techfin_load_to_db.py`。默认严格模式会阻断 A103、空值、
 > 假阳性和地区串区；先跑 `--dry-run`，查看 `load_report.md` / `load_errors.csv`，再决定是否
 > 用 `--allow-partial-batch` / `--include-missing` / `--include-non-actual` 放行。
+> 交互式入口：`A/A1/load/techfin_load_to_db_interactive.py`（菜单式，默认预演）。
 > 详细用法见 [`A/A1/README.md`](../A/A1/README.md) 的 ⑦ 小节。
 
 ---
