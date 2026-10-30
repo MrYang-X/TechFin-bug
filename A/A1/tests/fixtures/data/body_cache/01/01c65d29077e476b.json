@@ -1,0 +1,43 @@
+{
+ "article_id": "01c65d29077e476b",
+ "status": "ok",
+ "http_status": 200,
+ "page_type": "html",
+ "fetch_url": "http://gdstc.gd.gov.cn/zwgk_n/zcfg/gfwj/content/post_2691255.html",
+ "final_url": "http://gdstc.gd.gov.cn/zwgk_n/zcfg/gfwj/content/post_2691255.html",
+ "body_text": "广东省科学技术厅关于印发《广东省科学技术厅关于省工程技术研究中心建设的管理办法》的通知\n 时间 : 2013-12-31 11:12:56\n 来源 : 广东省科技厅政策法规处\n 【字体:大 中 小】\n 【打印】\n \n \n粤科函政字〔2013〕1513号\n各地级以上市科技局（委）、顺德区经济和科技促进局，各有关高校、科研院所，各有关单位：\n为进一步加强省工程技术研究中心建设和管理，加快推进企业研发机构建设，充分发挥省工程技术研究中心在促进技术创新、推动科技成果转化及产业化的示范和带动作用，现将《广东省科学技术厅关于省工程技术研究中心建设的管理办法》印发给你们，请遵照执行。\n省科技厅\n2013年11月14日",
+ "body_method": "trafilatura",
+ "body_chars": 305,
+ "attachments": [
+  {
+   "url": "http://gdstc.gd.gov.cn/msg/image/tzgg/2013/12/20131231fgc.doc",
+   "filename": "20131231fgc.doc",
+   "ext": ".doc",
+   "path": "E:\\Python\\bug\\A\\A1\\techfin_common_output\\body_cache\\attach\\01c65d29077e476b\\30911fd4286c.doc",
+   "sha1": "30911fd4286c755788de7f5d3ef465de64773db1",
+   "bytes": 39424,
+   "status": "ok",
+   "kind": "ole2",
+   "text_path": "E:\\Python\\bug\\A\\A1\\techfin_common_output\\body_cache\\attach\\01c65d29077e476b\\30911fd4286c.txt",
+   "text_chars": 0,
+   "text_method": "none(真OLE2.doc暂不支持)",
+   "is_scanned": false
+  }
+ ],
+ "meta": {
+  "article_id": "01c65d29077e476b",
+  "title": "广东省科学技术厅关于印发《广东省科学技术厅关于省工程技术研究中心建设的管理办法》的通知",
+  "url": "http://gdstc.gd.gov.cn/zwgk_n/zcfg/gfwj/content/post_2691255.html",
+  "real_url": "",
+  "source": "广东省科学技术厅·政策文件",
+  "date": "2013-12-31",
+  "keyword": "",
+  "level3_code": "",
+  "level3_name": "",
+  "unit": "",
+  "region_code": "",
+  "region_name": "",
+  "kind": "official"
+ },
+ "fetch_time": "2026-10-19 15:32:57"
+}

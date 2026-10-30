@@ -248,7 +248,7 @@ def clean_text(text):
 
 
 def is_relevant(text, keyword, core_terms, qualifier_terms=(),
-                anchor_terms=(), required_terms=()):
+                anchor_terms=(), required_terms=(), max_token_gap=0):
     """
     判断一条结果是否与当前检索词相关。检索词由主题配置传入，本模块不认识任何
     具体词——所以它对主题无感，新增主题只需改配置。
@@ -272,6 +272,17 @@ def is_relevant(text, keyword, core_terms, qualifier_terms=(),
         return False
     tokens = [t for t in keyword.split() if t]
     hit = bool(tokens) and all(t in text for t in tokens)
+    if hit and max_token_gap and len(tokens) > 1:
+        # 多词检索式要求 token 在有限窗口内共现，避免"标题有地区、摘要远处有指标"
+        positions = []
+        for t in tokens:
+            pos = text.find(t)
+            if pos < 0:
+                hit = False
+                break
+            positions.append(pos)
+        if hit and positions and (max(positions) - min(positions)) > max_token_gap:
+            hit = False
     if hit and keyword in qualifier_terms:
         hit = any(c in text for c in core_terms)
     if hit and anchor_terms:
@@ -300,6 +311,32 @@ def generate_article_id(title, url):
     """去重键：标题 + 链接。同一篇在跨轮/跨源下都得到同一个 id"""
     raw = f"{title}{url}".encode("utf-8")
     return hashlib.md5(raw).hexdigest()[:16]
+
+
+def simhash64(text):
+    """
+    轻量 SimHash（64 位）。中文按 3-gram 切分，用于标注"同文不同 URL"的近重复。
+    纯 Python 实现，不引入第三方依赖；空文本返回 0。
+    """
+    s = re.sub(r"\s+", "", text or "")
+    if not s:
+        return 0
+    grams = [s[i:i + 3] for i in range(max(1, len(s) - 2))]
+    bits = [0] * 64
+    for gram in grams:
+        h = int.from_bytes(hashlib.md5(gram.encode("utf-8")).digest()[:8], "big")
+        for b in range(64):
+            bits[b] += 1 if (h >> b) & 1 else -1
+    out = 0
+    for b in range(64):
+        if bits[b] > 0:
+            out |= (1 << b)
+    return out
+
+
+def hamming64(a, b):
+    """两个 64 位 SimHash 的汉明距离。"""
+    return bin(int(a) ^ int(b)).count("1")
 
 
 def normalize_url(url, base="https://www.baidu.com"):
@@ -470,7 +507,7 @@ def blocking_reason(resp):
 # 部分来源（如腾讯网、微信公众号）会把域名当标题渲染，
 # 例：new.qq.com/rain/a/20251223A03X7M00
 _URL_TITLE_RE = re.compile(
-    r"^[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+\.[A-Za-z]{2,}(?::\d+)?(?:/|$)"
+    r"^(?:https?://)?(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,}(?::\d+)?(?:/|$)"
 )
 
 
@@ -506,15 +543,23 @@ def clean_dataframe(df):
         return df
     original_len = len(df)
     df = df.drop_duplicates(subset=["article_id"], keep="first")
+
+    # 标题退化成 URL 的判断必须在 clean_text 之前：
+    # clean_text 会先删掉 http(s)://，之后 looks_like_url_title 永远为 False。
+    raw_title = df["title"].astype(str) if "title" in df.columns else None
+    if raw_title is not None:
+        df["title_is_url"] = raw_title.apply(looks_like_url_title)
     for col in ["title", "summary", "source"]:
         if col in df.columns:
             df[col] = df[col].apply(clean_text)
 
-    # 标题退化成URL的回退：用摘要开头代替（不额外发请求）
-    df["title_is_url"] = df["title"].apply(looks_like_url_title)
-    if df["title_is_url"].any():
+    # 标题是 URL 时用摘要开头代替（不额外发请求）；无摘要则保留原 URL 标题
+    if "title_is_url" in df.columns and df["title_is_url"].any():
         mask = df["title_is_url"] & (df["summary"].str.len() > 0)
         df.loc[mask, "title"] = df.loc[mask, "summary"].str[:30]
+        no_summary = df["title_is_url"] & (df["title"].str.len() < 5)
+        if raw_title is not None:
+            df.loc[no_summary, "title"] = raw_title[no_summary].str[:120]
 
     df = df[df["title"].str.len() >= 5]
     df["crawl_time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")

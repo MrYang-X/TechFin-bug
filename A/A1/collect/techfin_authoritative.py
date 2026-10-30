@@ -61,7 +61,9 @@ sys.path.insert(0, str(_TOPIC_DIR / "config"))  # → topic_config / extract_con
 # （配置目录已由上面的主题目录引导加入 sys.path）
 
 import topic_config as cfg  # noqa: E402  （须在 sys.path 引导之后导入）
+from paths import finish_run_manifest, new_pipeline_run, pipeline_root  # noqa: E402
 from crawler_common import (  # noqa: E402
+    append_progress,
     blocking_reason,
     clean_dataframe,
     clean_text,
@@ -69,12 +71,12 @@ from crawler_common import (  # noqa: E402
     export_link_list,
     generate_article_id,
     get_random_headers,
+    guess_encoding,
     is_relevant,
+    load_progress,
     make_article,
     merge_with_existing,
     print_quality_report,
-    resolve_output_root,
-    resolve_run_dir,
     run_logging,
 )
 
@@ -140,25 +142,38 @@ def page_urls(source, max_pages):
     return urls
 
 
-def fetch_page(url, session, label):
-    """返回 Response 或 None（网络异常/被拦截）"""
-    try:
-        resp = session.get(url, headers=get_random_headers(referer=url),
-                           timeout=20)
-    except requests.RequestException as e:
-        print(f"      [异常] {label} 请求失败：{e}")
-        return None
+def fetch_page(url, session, label, retries=2):
+    """返回 Response 或 None（网络异常/被拦截）。网络异常/429/5xx 重试一次。"""
+    last_err = None
+    for attempt in range(retries):
+        try:
+            resp = session.get(url, headers=get_random_headers(referer=url),
+                               timeout=20)
+        except requests.RequestException as e:
+            last_err = e
+            if attempt < retries - 1:
+                time.sleep(random.uniform(*cfg.OFFICIAL_DELAY))
+                continue
+            print(f"      [异常] {label} 请求失败：{e}")
+            return None
 
-    resp.encoding = resp.apparent_encoding or "utf-8"
-    if resp.status_code != 200:
-        print(f"      [警告] {label} 状态码 {resp.status_code}")
-        return None
+        # 政府站大量 GBK/GB2312，统一走 guess_encoding（与搜索/正文一致）
+        resp.encoding = guess_encoding(resp)
+        if resp.status_code in (429, 500, 502, 503, 504) and attempt < retries - 1:
+            time.sleep(random.uniform(*cfg.OFFICIAL_DELAY))
+            continue
+        if resp.status_code != 200:
+            print(f"      [警告] {label} 状态码 {resp.status_code}")
+            return None
 
-    reason = blocking_reason(resp)
-    if reason:
-        print(f"      [警告] {label} {reason}")
-        return None
-    return resp
+        reason = blocking_reason(resp)
+        if reason:
+            print(f"      [警告] {label} {reason}")
+            return None
+        return resp
+    if last_err:
+        print(f"      [异常] {label} 请求失败：{last_err}")
+    return None
 
 
 # ==================== 产物落地 ====================
@@ -180,18 +195,20 @@ def artifact_paths(run_dir):
     }
 
 
-def run_once(run_dir, paths, accumulator):
+def run_once(run_dir, paths, accumulator, progress_path=None, fresh=False, limit_pages=None):
     print("=" * 60)
     print("科技金融指数研究 · 官方政策源采集（用于交叉印证）")
     print("=" * 60)
     print(f"检索词：{'、'.join(cfg.AUTH_KEYWORDS)}")
-    print(f"每源翻页：{cfg.MAX_PAGES_PER_SOURCE} 页 | "
+    max_pages = int(limit_pages or cfg.MAX_PAGES_PER_SOURCE)
+    print(f"每源翻页：{max_pages} 页 | "
           f"保存全部条目：{'是' if cfg.SAVE_ALL_ITEMS else '否（只存命中）'}")
     print(f"产物目录：{run_dir}")
 
     session = requests.Session()
     seen = set()
     articles = []
+    done = set() if fresh or not progress_path else load_progress(progress_path)
     stats = {
         "per_keyword": {kw: 0 for kw in cfg.AUTH_KEYWORDS},
         "per_source": {},
@@ -207,7 +224,10 @@ def run_once(run_dir, paths, accumulator):
         print(f"\n-- 来源：{label}（{source['name']}）")
         stats["per_source"][label] = 0
 
-        for page_no, url in enumerate(page_urls(source, cfg.MAX_PAGES_PER_SOURCE), 1):
+        for page_no, url in enumerate(page_urls(source, max_pages), 1):
+            if (source["name"], url) in done:
+                print(f"    第 {page_no} 页 [跳过] 台账已成功")
+                continue
             resp = fetch_page(url, session, label)
             if resp is None:
                 stats["failed_pages"] += 1
@@ -225,7 +245,8 @@ def run_once(run_dir, paths, accumulator):
             for title, date_raw, link in rows:
                 matched = [kw for kw in cfg.AUTH_KEYWORDS
                            if is_relevant(title, kw, cfg.CORE_TERMS,
-                                          cfg.QUALIFIER_TERMS)]
+                                          cfg.QUALIFIER_TERMS,
+                                          max_token_gap=cfg.RELEVANCE_MAX_TOKEN_GAP)]
                 if not matched and not cfg.SAVE_ALL_ITEMS:
                     stats["irrelevant_dropped"] += 1
                     continue
@@ -249,6 +270,12 @@ def run_once(run_dir, paths, accumulator):
 
             print(f"    第 {page_no} 页 解析 {len(rows)} 条，入库 {new} 条"
                   f"（累计命中关键词 {stats['matched_total']} 条）")
+            if progress_path:
+                append_progress(progress_path, [{
+                    "source": source["name"], "plan_key": url, "status": "ok",
+                    "n_items": len(rows),
+                    "ts": time.strftime("%Y-%m-%d %H:%M:%S"),
+                }])
             time.sleep(random.uniform(*cfg.OFFICIAL_DELAY))
 
     if not articles:
@@ -295,27 +322,36 @@ def parse_args(argv=None):
     ap = argparse.ArgumentParser(
         description=f"{cfg.TOPIC_LABEL} · 官方政策源采集（用于交叉印证）")
     ap.add_argument("--output-dir",
-                    help="输出根目录（覆盖 topic_config.OUTPUT_ROOT）。"
-                         "相对路径锚定到本脚本所在目录，也可写绝对路径把"
+                    help="数据根目录（覆盖 topic_config.DATA_ROOT）。"
+                         "相对路径锚定到本主题目录，也可写绝对路径把"
                          "数据放到仓库外")
+    ap.add_argument("--fresh", action="store_true",
+                    help="忽略 official_progress.csv 台账，全量重采")
+    ap.add_argument("--limit-pages", type=int, default=None,
+                    help="每个源最多翻 N 页（默认 topic_config.MAX_PAGES_PER_SOURCE）")
     return ap.parse_args(argv)
 
 
 def main(argv=None):
     args = parse_args(argv)
 
-    # 一切路径锚定到脚本自身位置，不依赖当前工作目录
+    # 一切路径锚定到主题目录，不依赖当前工作目录
     topic_dir = _TOPIC_DIR
-    out_root = resolve_output_root(topic_dir, cfg.OUTPUT_ROOT, args.output_dir)
+    out_root = pipeline_root(topic_dir, args.output_dir)
     accumulator = out_root / cfg.OFFICIAL_ACCUMULATOR
 
-    run_dir = resolve_run_dir(out_root)
+    run_dir = new_pipeline_run("collect-official", override=args.output_dir, topic_dir=topic_dir)
     paths = artifact_paths(run_dir)
+    status = "failed"
     try:
         with run_logging(paths["log"]):
-            print(f"输出根目录：{out_root}")
-            run_once(run_dir, paths, accumulator)
+            print(f"数据根目录：{out_root}")
+            run_once(run_dir, paths, accumulator,
+                     progress_path=str(out_root / cfg.OFFICIAL_PROGRESS),
+                     fresh=args.fresh, limit_pages=args.limit_pages)
+        status = "ok"
     finally:
+        finish_run_manifest(run_dir, status=status)
         # 此处 stdout 已恢复，只作提示不写入日志；崩溃时尤其需要知道存到哪了
         print(f"[归档] 本轮产物目录：{run_dir}")
 

@@ -3,8 +3,11 @@
 本目录是一个**完整自洽的采集主题**，脚本按功能分目录：
 `config/`（配置）· `collect/`（① 采集）· `fetch/`（② 抓取 + ⑤ OCR）· `clean/`（④ 清洗）·
 `extract/`（③ 抽取）· `report/`（印证 / 质量 / 评估）· `load/`（⑦ 可选入库 + 交互入口）。
-流水线 **① → ② → ⑤ → ④ → ③**，⑦ 是可选后处理；产物全部落在本目录下的输出根
-`techfin_common_output/`；`run_all.py` 可按序一键跑主链。
+流水线 **① → ② → ⑤ → ④ → ③**，⑦ 是可选后处理；产物按生命周期分成两个根：
+- **`data/`**：流水线数据根（采集累积库、正文缓存、各阶段运行目录、评估）；
+- **`reports/db_load/`**：⑦ 入库报告根（与爬虫数据完全分离，独立 `YYYY.M.D-N` 序号）。
+
+旧的 `techfin_common_output/` 只读保留，新流水线不再写入；`run_all.py` 可按序一键跑主链。
 
 通用的爬虫机械（目录分配、日志、日期解析、清洗、导出、累积合并）在**仓库根**
 的 `crawler_common.py`，与主题无关，不要在本目录里复制一份。
@@ -19,6 +22,8 @@
 crawler_common.py      （仓库根；叶子模块：通用工具，不 import 任何本地模块）
 config/topic_config.py    （叶子模块：本主题常量，不 import 任何本地模块）
 config/extract_config.py  （叶子模块：③ 的抽取规则/地区别名/LLM 契约，不 import 本地模块）
+config/paths.py           （路径契约：import topic_config + crawler_common，统一数据根/报告根/清单）
+config/region_rules.py    （地区识别：import topic_config + extract_config，③④ 共用）
         ▲
         │ import
         ├── collect/TechFin-bug.py             ① 搜索引擎爬虫（百度 + Bing + 360）
@@ -37,31 +42,31 @@ config/extract_config.py  （叶子模块：③ 的抽取规则/地区别名/LLM
 数据流（脚本之间**只通过文件交互**，谁都不调用谁）：
 
 ```
-collect/TechFin-bug.py            ──写──→ <OUT_ROOT>/<日期-次数>/search_*
-                                           <OUT_ROOT>/tech_fin_news.csv      ← 累积总库
+collect/TechFin-bug.py            ──写──→ data/<日期-次数>/search_*
+                                           data/tech_fin_news.csv             ← 累积总库
 
-collect/techfin_authoritative.py  ──写──→ <OUT_ROOT>/<日期-次数>/official_*
-                                           <OUT_ROOT>/techfin_official.csv   ← 累积总库
+collect/techfin_authoritative.py  ──写──→ data/<日期-次数>/official_*
+                                           data/techfin_official.csv          ← 累积总库
                                                   │
 fetch/techfin_fetch_body.py       ──读①──→ 上面两个累积总库
-                                  ──写──→ <OUT_ROOT>/body_cache/           ← 正文 JSON/TXT + 附件二进制
+                                  ──写──→ data/body_cache/                  ← 正文 JSON/TXT + 附件二进制
                                                   │
 fetch/techfin_ocr.py              ──读②──→ body_cache/（纯本地，不发请求）
                                   ──写──→ 回写 body_cache/                 ← 扫描件附件补出 .txt
                                                   │
 clean/techfin_curate.py           ──读①②─→ 累积总库 + body_cache/（纯本地，不发请求）
-                                  ──写──→ <OUT_ROOT>/curated_corpus.csv     ← 文章级干净语料
-                                           <OUT_ROOT>/curated_uncertain.csv ← 官方泛化标题待确认队列
-                                           <OUT_ROOT>/curated_dropped.csv   ← 被剔除条目
+                                  ──写──→ data/curated_corpus.csv           ← 文章级干净语料
+                                           data/curated_uncertain.csv      ← 官方泛化标题待确认队列
+                                           data/curated_dropped.csv        ← 被剔除条目
                                                   │
 extract/techfin_extract_points.py ──读②④─→ body_cache/ + curated_corpus.csv
-                                  ──写──→ <OUT_ROOT>/techfin_a101_points.csv（证据级，跨轮累积）
-                                           <OUT_ROOT>/<日期-次数>/points_resolved.csv（聚合级）
+                                  ──写──→ data/techfin_a101_points.csv（证据级，跨轮累积）
+                                           data/<日期-次数>/points_resolved.csv（聚合级）
 load/techfin_load_to_db.py        ──读③④─→ points_resolved.csv + techfin_a101_points.csv + curated_corpus.csv
                                   ──写──→ MySQL fact_index_value（可选后处理）
-                                           <最新运行目录>/load_report.md / load_errors.csv / load_log
-report/verify_points.py           ──读③──→ 数据点 CSV ──写──→ <最新运行目录>/points_validation.md
-report/verify_corpus.py           ──读①②─→ 两个累积总库 ──写──→ <最新运行目录>/corpus_verification.md
+                                           reports/db_load/<日期-次数>/load_report.md / load_errors.csv / load_log
+report/verify_points.py           ──读③──→ 数据点 CSV ──写──→ data/<最新运行目录>/points_validation.md
+report/verify_corpus.py           ──读①②─→ 两个累积总库 ──写──→ data/<最新运行目录>/corpus_verification.md
 ```
 
 > **脚本可在任意工作目录执行**：每个脚本都向上定位 `crawler_common.py`（仓库根）与
@@ -100,7 +105,8 @@ report/verify_corpus.py           ──读①②─→ 两个累积总库 ─�
 | `report/techfin_eval.py` | ⑥ 评估闭环：标注模板 + precision/recall 报告（只读） | ③ 数据点 CSV + ② 缓存 | `eval/label_precision.csv` / `eval/eval_report.md` |
 | `run_all.py` | 一键按序跑（按 ①→②→⑤→④→③→报告 调子进程） | — | — |
 
-> 各脚本参数见 `python <子目录>/<脚本> --help`；`--output-dir <路径>` 可临时改输出根（相对路径锚定主题目录）。
+> 各脚本参数见 `python <子目录>/<脚本> --help`；`--output-dir <路径>` 可临时改数据根
+> （相对路径锚定主题目录）。⑦ loader 另有 `--report-root` 改入库报告根。
 
 ---
 
@@ -145,7 +151,7 @@ python load/techfin_load_to_db.py                              # 写入默认库
 python load/techfin_load_to_db.py --database techfin_test \
     --host 127.0.0.1 --port 3306 --user root --ask-password    # 指定目标库（密码交互输入）
 python load/techfin_load_to_db.py \
-    --input-file techfin_common_output/2026.10.19-6/points_resolved.csv   # 指定输入
+    --input-file data/2026.10.19-6/points_resolved.csv   # 指定输入
 python load/techfin_load_to_db.py --all-runs --only-level3 A101           # 合并所有轮次/只入 A101
 python load/techfin_load_to_db.py --allow-partial-batch                   # 当前数据可写入 1 行（2355）
 python load/techfin_load_to_db.py --self-test                             # 纯函数自测
@@ -183,9 +189,12 @@ python load/techfin_load_to_db_interactive.py                             # 交�
 **补抓闭环（提高召回）**：`fetch/techfin_fetch_body.py --from-curated`（只抓 ④ 挑出的"相关但无正文 + 待确认"
 队列）→ 重跑 `④` 复判 → 重跑 `③`。
 
-**输出位置**：**各脚本**都支持 `--output-dir <路径>` 临时改输出位置；不传就用 `topic_config.OUTPUT_ROOT`。
+**输出位置**：各脚本都支持 `--output-dir <路径>` 临时改**数据根**，不传就用
+`topic_config.DATA_ROOT`（默认 `data/`）。⑦ loader 另有 `--report-root <路径>` 改**入库报告根**
+（默认 `reports/db_load/`），报告不再写进爬虫运行目录。
 相对路径锚定到**本目录**（不是当前工作目录），也可写绝对路径放到仓库外。
-**注意：换了输出位置，累积总库（含正文缓存）也跟着走，会在新位置从零开始累积**，原数据不会自动搬过去。
+**注意：换了数据根，累积总库（含正文缓存）也跟着走，会在新位置从零开始累积**，原数据不会自动搬过去。
+旧的 `techfin_common_output/` 只读保留，新流水线不再写入。
 
 ### ①-a 搜索引擎采集是"指标化采集"：从检索词到指标 + 地区
 
@@ -248,37 +257,59 @@ python collect/TechFin-bug.py --fresh                    # 忽略续跑台账，
 重复约束，代价是把真数据杀掉：同一轮里被锚点丢弃的正是"荔湾区现有高新技术企业 302 家"
 "科技型中小企业申报"这类 A1 指标的核心语料。`ANCHOR_TERMS` 置空即全局关闭。
 
+**①-b 官方源与覆盖率。** 官方源改用 `guess_encoding` 处理 GBK/GB2312，避免 `apparent_encoding`
+误判；新增 `official_progress.csv`（`source/page_url/status/n_items/ts`）按"源+页 URL"断点续跑，
+重跑跳过已成功页，`--fresh` 全量重采、`--limit-pages N` 分批。①-a 额外输出
+`<运行目录>/coverage_report.json`、`coverage_by_region.csv`、`coverage_latest.json`，
+逐检索式标记 `ok/ok_zero/failed/skipped_resume/tripped/not_run`——**未执行/失败不等于该地区没有数据**。
+
 ### 产物长什么样
 
 ```
-techfin_common_output/
-├── tech_fin_news.csv          ← ① 累积总库（搜索引擎，跨轮读写）
-├── techfin_official.csv       ← ① 累积总库（官方源，跨轮读写）
-├── tech_fin_search_progress.csv  ← ① 续跑台账（进度标记，非数据：source/plan_key/status/n_items/ts）
-├── body_cache/                ← ② 正文缓存（跨轮复用；正文 JSON/TXT + 附件二进制；扫描件由 ⑤ 补出 .txt）
-│   ├── body_progress.csv          ② 续跑台账（source="body", plan_key=<article_id>）
-│   └── ab/ab12cd34ef56.json       正文+元数据+附件索引（按 article_id 前 2 位分桶）
-├── a101_llm_cache/            ← ③ LLM 结果缓存（key=article_id+prompt_version+model）
-├── a101_llm_calls.jsonl       ← ③ LLM 调用审计（逐次追加，保证可复现）
-├── techfin_a101_points.csv    ← ③ 证据级数据点累积总库（一行 = 一个数据点）
-├── curated_corpus.csv         ← ④ 文章级干净语料（超集视图：规范化+相关性+分级+事件分组）
-├── curated_uncertain.csv      ← ④ 官方泛化标题待确认队列（供 ② --from-curated 补抓）
-├── curated_dropped.csv        ← ④ 被剔除条目（含原因，便于复核）
-├── eval/                      ← ⑥ 评估闭环（固定目录，跨轮复用）
-│   ├── label_precision.csv       标注模板（人工填 correct/wrong/partial）
-│   └── eval_report.md            评估报告（precision/recall/年份正确率）
-└── 2026.9.27-1/               ← 每轮运行目录（各脚本共用当日序号，靠前缀区分）
-    ├── search_*                    ①-a collect/TechFin-bug.py 本轮产物
-    ├── official_* / corpus_verification.md   ①-b / report/verify_corpus.py
-    ├── body_log / body_index.csv   ② fetch/techfin_fetch_body.py 本轮产物
-    ├── ocr_log / ocr_index.csv     ⑤ fetch/techfin_ocr.py 本轮产物
-    ├── curated_log / curated_report.md / curated_corpus.csv   ④ clean/techfin_curate.py 本轮产物
-    ├── points_log / points_delta.csv / points_resolved.csv / points_validation.md   ③ / ③验
-    └── load_log / load_report.md / load_errors.csv   ⑦ 可选入库（load/techfin_load_to_db.py）
+A/A1/
+├── data/                          ← 流水线数据根（生成物，默认不纳入 git）
+│   ├── tech_fin_news.csv          ← ① 累积总库（搜索引擎，跨轮读写）
+│   ├── techfin_official.csv       ← ① 累积总库（官方源，跨轮读写）
+│   ├── tech_fin_search_progress.csv  ← ① 搜索续跑台账
+│   ├── official_progress.csv      ← ① 官方源分页台账（source/page_url/status/n_items/ts）
+│   ├── coverage_latest.json       ← ① 最近一轮逐检索式覆盖率汇总
+│   ├── coverage_by_region.csv     ← ① 按县级单元的覆盖率明细
+│   ├── body_cache/                ← ② 正文缓存（跨轮复用；正文 JSON/TXT + 附件二进制）
+│   │   ├── body_progress.csv          ② 续跑台账（source="body", plan_key=<article_id>）
+│   │   └── ab/ab12cd34ef56.json       正文+元数据+附件索引（按 article_id 前 2 位分桶）
+│   ├── a101_llm_cache/            ← ③ LLM 结果缓存（key=article_id+prompt_version+model）
+│   ├── a101_llm_calls.jsonl       ← ③ LLM 调用审计（逐次追加，含 usage/成本/错误）
+│   ├── techfin_a101_points.csv    ← ③ 证据级数据点累积总库（一行 = 一个数据点）
+│   ├── curated_corpus.csv         ← ④ 文章级干净语料（含 indicator_codes_all/region_from 等）
+│   ├── curated_uncertain.csv      ← ④ 官方泛化标题待确认队列（供 ② --from-curated 补抓）
+│   ├── curated_dropped.csv        ← ④ 被剔除条目（含原因，便于复核）
+│   ├── eval/                      ← ⑥ 评估闭环 + 覆盖率历史
+│   └── 2026.9.27-1/               ← 每阶段运行目录（YYYY.M.D-N，靠前缀区分阶段）
+│       ├── _run.json                  阶段/脚本/参数/输入输出指纹/状态（目录自描述）
+│       ├── coverage_report.json        ① 逐检索式采集状态
+│       ├── search_* / official_*       ① 本轮产物
+│       ├── body_log / body_index.csv   ② 本轮产物
+│       ├── ocr_log / ocr_index.csv     ⑤ 本轮产物（含 low_conf_pages/truncated）
+│       ├── curated_*                   ④ 本轮产物
+│       ├── points_delta.csv            ③ 证据级
+│       ├── points_resolved.csv         ③ 聚合级
+│       ├── points_dropped.csv          ③ 被丢弃点审计（指标/口径/单位/子句不符）
+│       ├── extraction_report.md        ③ LLM 尝试/成功/失败/token/成本/是否降级
+│       └── points_validation.md        ③验 质量报告
+├── reports/
+│   └── db_load/                   ← ⑦ 入库报告根（独立序号，不与爬虫混合）
+│       └── 2026.9.27-1/
+│           ├── load_log
+│           ├── load_report.md
+│           ├── load_errors.csv
+│           ├── load_manifest.json     输入 SHA-256/参数/漏斗/目标库（不含密码）
+│           └── _run.json
+└── techfin_common_output/         ← 旧产物根：只读保留，新代码不再写入
 ```
 
 日志由脚本自己写（`*_log`），**不需要再用 shell 重定向 `> run.log`**；
-好处是跑崩时的 traceback 也会落进日志。
+好处是跑崩时的 traceback 也会落进日志。每个运行目录的 `_run.json` 记录阶段、脚本、参数、
+输入输出 SHA-256 与状态，数据量大后也能一眼分清"这个目录是谁跑出来的"。
 
 ### ②③ 二级抓取与数值抽取（新增流水线）
 
@@ -290,17 +321,31 @@ techfin_common_output/
 - **礼貌与合规**：按主机限速（`HOST_MIN_INTERVAL`）+ 遵守 robots.txt（`ROBOTS_ENFORCE`）。
 - **扫描件 PDF 不做 OCR**：正文密度过低判为扫描件并标记 `is_scanned`（缺口在报告里可见）。
 - **断点续跑**：已成功（status=ok）跳过；失败/被拦的重跑自动重试。
+- **可追溯**：`--save-html` 额外保存 `body_cache/raw_html/<aid>.html.gz`，便于换抽取器后重放；
+  附件同时记录绝对路径与相对路径（`path_rel/text_rel`），换数据根后仍可定位。
 
 **③ `extract/techfin_extract_points.py` —— 抽 A101 数值数据点。** 读 `body_cache/`（**纯读，不发请求**）：
 - **规则层**（零成本）正则匹配"XX 区新增高新技术企业 123 家"等；**LLM 层**（Claude Sonnet 5.5，
   结构化输出）在提到指标时兜底，专门区分 `actual`（实际/累计/现有）与 `planned/target`（拟/计划/目标）。
 - **有 LLM 结果时以 LLM 为准**（规则层在真实政府文本上假阳性较多，仅作交叉印证与离线回退）。
+- **A103 错标根治**：规则层只产 `A101`，不再继承文章级 `level3_code`；再做指标-口径-单位一致性校验，
+  不合格点写入 `<运行目录>/points_dropped.csv`，不静默。
+- **地区按数字锚点判定**：取数字前 20/后 10 字窗口；`全市` 映射到父级市码，`query/none` 降为低置信；
+  loader 默认拒绝无文本地区证据的县级行。
+- **子句级数字绑定**：指标词与数字必须同子句；"分别有/各区"等拆分值标 `aggregation_type=breakdown`，
+  不参与主值；"254 家、421 家、57 家"不会再全部算成 A101。
+- **年份置信**：`doc` 只取同段落前 300 字内最近的年，不再用全文第一个年；新增
+  `year_confidence/year_evidence`，低置信年份不产主值。
+- **LLM 失败可见**：缺凭据/认证失败默认退出码 3，不再静默降级；`--allow-rule-fallback` 才允许纯规则继续；
+  `a101_llm_calls.jsonl` 记录 usage/延迟/成本/错误，`<运行目录>/extraction_report.md` 汇总。
+  LLM 点的 `evidence_snippet` 会在正文/附件中定位，定位不到标 `evidence_verified=0`，
+  loader 默认拒绝（`--allow-unverified-evidence` 可放行）。
 - 输出两份 CSV：证据级 `techfin_a101_points.csv`（一行 = 一个数据点，含原文 `evidence_snippet`）
   与聚合级 `<运行目录>/points_resolved.csv`（一行 = 一个 地区×年份×指标 格）。
 - **列与 SQL 事实表对齐**：聚合级列可直取 `fact_tech_finance_data`（`level3_code`→`index_id`、
   `canonical_value`→`index_value`、`authority`→`data_quality`、`source_article_ids`→`evidence_ref`）。
 - **"拟/减少"标记而非丢弃**：`context_type` 为 `planned/target/decline` 的数据点照样入库，
-  聚合层默认只把 `actual` 选为主值。抽取规则/地区别名/LLM 契约集中在 `config/extract_config.py`。
+  聚合层默认只把 `actual` 选中主值。抽取规则/地区别名/LLM 契约集中在 `config/extract_config.py`。
 
 **③验 `report/verify_points.py`** 只读数据点 CSV → 写 `points_validation.md`（维度分布、置信度、
 地区覆盖、**多源冲突组**、缺口统计、随机抽检样本）。
@@ -320,9 +365,14 @@ techfin_common_output/
 - **官方泛化标题**（含"名单/公示/认定/公布"但无词族、无正文）不硬删也不硬留 → `curated_uncertain.csv` 待 ② 补正文复判。
 - **"高企"形容词消歧**（成本/物价…高企）已内置，为铺到 124 县预留。
 - **质量分级 `quality_grade` 1-4**（对齐 SQL `data_quality`）：1 年鉴公报 / 2 官方公报 / 3 媒体 / 4 相关待补。
+- **指标码不再盲取 `codes[0]`**：多词族命中时按"标题 > 摘要 > 正文"选主指标，全部命中写入
+  `indicator_codes_all` 供复核；官方语料缺列时按此回填。
+- **地区来源细分**：`region_from=title/summary/body/meta`，标题/摘要的市级口径不会被正文深层区县覆盖。
+- **近重复标注**：同 (地区, 指标) 桶内用 64 位 SimHash 比较，汉明距离 ≤3 的后来者标
+  `is_near_dup=1 / near_dup_of / near_dup_score`；**只标注、不删除**，多源转载仍保留。
 - **链接去重**只删白名单追踪参数（微信 `scene`、`utm_*` 等），保留内容参数与路径、保留原 `url` 可复核；
   **同事件转载并存是多来源特性**，只做 `event_group_id` 标注、不合并。
-- 产物 `curated_corpus.csv`（文章级超集视图，46 列）+ `curated_report.md`（漏斗计数、回归哨兵、抽检样本）。
+- 产物 `curated_corpus.csv`（文章级超集视图，含新增审计列）+ `curated_report.md`（漏斗计数、回归哨兵、抽检样本）。
 - **反哺**：「相关但无正文」+ `curated_uncertain.csv` = ② 的 `--from-curated` 待抓队列；
   ③ 默认只抽 `curated_corpus.csv` 里提纯通过的文章、用 `quality_grade` 作 `data_quality`、并回填官方缺失的指标/地区列。
 
@@ -333,7 +383,9 @@ techfin_common_output/
 
 - **只看扫描件**：挑 `attachments[]` 里 `is_scanned=True` 的 `.pdf`；已 OCR（`ocr_applied`）的跳过，`--refresh` 可重跑。
 - **流程**：`pypdfium2` 把每页渲染成图（`OCR_DPI`）→ `PaddleOCR.predict` → 取每页 `rec_texts` 拼接。
-- **写回字段**：`text_method="paddleocr"`、`is_scanned=False`、`ocr_applied=True`、`ocr_pages`、`ocr_dpi`、`ocr_avg_conf`。
+- **写回字段**：`text_method="paddleocr"`、`is_scanned=False`、`ocr_applied=True`、`ocr_pages`、`ocr_dpi`、`ocr_avg_conf`；
+  新增 `ocr_page_conf`（逐页置信度）、`ocr_low_conf_pages`（<0.8 的页码）、`ocr_truncated`（超过 `OCR_MAX_PAGES`）。
+  `ocr_index.csv` 同步输出 `low_conf_pages/truncated`，低置信页进入人工复核队列。
 - **下游**：③ 读附件 `.txt` 的逻辑**自动吃到** OCR 文本（无需改 ③）。
 - **前置（一次性，模型需下载）**：
   ```bash
@@ -393,6 +445,12 @@ techfin_common_output/
 - `planned/target/decline/unknown` 默认跳过；`--include-non-actual` 才写入；
 - 拒绝“10 个工作日”、服务企业/名单/孵化器假阳性、补充公布/更名/搬迁批次、
   `全市/全省/其他区县/试验区` 等地区串区、`doc` 低置信年份；
+- **新增地区置信门禁**：`region_from=query/none/scope_national` 的县级行默认拒绝
+  （`REGION_UNVERIFIED`），`--allow-region-query` 才放行；
+- **新增拆分口径门禁**：`aggregation_type=breakdown/subset` 默认拒绝
+  （`AGGREGATE_VALUE`），`--allow-breakdown` 才放行；
+- **新增年份置信门禁**：`year_confidence < 0.5` 默认拒绝（`YEAR_LOW_CONFIDENCE`）；
+- **新增指标状态门禁**：`dim_index.status` 非 `active` 默认拒绝（`INDEX_INACTIVE`）；
 - 当前数据严格模式预期：**输入 20 → 通过 0 → 写入 0 → 拒绝 10 / 跳过 10**；
   `--allow-partial-batch` 可写入 2355 这一行。
 
@@ -402,18 +460,26 @@ techfin_common_output/
 - 唯一键 `(region_code, year, level3_code, measure_code, context_type)`，
   `INSERT ... ON DUPLICATE KEY UPDATE`；重复执行不会产生重复行。
 - `--upsert-policy overwrite|better|skip`：默认覆盖；`better` 只在质量不差于旧值时更新。
+- `--write-mode transaction|chunked`：默认 `transaction`，全部成功才提交；任一行 DB 错误时
+  整体回滚（`--on-db-error abort`）。大数据量可切 `chunked`（允许部分写入）。
+- `--skip-imported` 按 `file_sha256` 跳过 `import_batch` 中已成功导入的文件；`--force` 强制重导。
 - `missing` 行用 `ON DUPLICATE KEY UPDATE id=id`，**不会覆盖已有 present 行**。
 
 **单位**：存实际观测单位（家/户/万元/亿元/%），**不做跨单位换算**；`value_text` 保留原文；
 `standard_unit` 在 `dim_index_measure`，下游计算层需要时再归一化。
 
-**报告**：默认写入新建运行目录 `<YYYY.M.D-N>/`：
+**报告**：默认写入**独立的入库报告根** `reports/db_load/<YYYY.M.D-N>/`
+（与爬虫数据根 `data/` 完全分离，序号也独立）：
 
 ```
 load_log
-load_report.md     漏斗、拒绝/跳过原因、写入明细、警告、复现命令
-load_errors.csv    row_no/error_code/error_detail/evidence_snippet/suggestion
+load_report.md       漏斗、拒绝/跳过原因、写入明细、警告、字段截断、复现命令
+load_errors.csv      row_no/error_code/error_detail/evidence_snippet/row_json/suggestion
+load_manifest.json   输入文件/SHA-256/参数快照/维度行数/漏斗统计/目标库（不含密码）
+_run.json            阶段/脚本/参数/状态
 ```
+
+`--report-root` 可改报告根；`--report-dir` 可精确指定某个目录（会覆盖同名报告）。
 
 **常用参数**：
 
@@ -426,6 +492,12 @@ python load/techfin_load_to_db.py --include-missing         # 空值写 missing
 python load/techfin_load_to_db.py --allow-partial-batch     # 放行补充公布/更名/搬迁批次
 python load/techfin_load_to_db.py --allow-approx            # 放行约数
 python load/techfin_load_to_db.py --allow-low-confidence-year
+python load/techfin_load_to_db.py --allow-region-query       # 放行无文本地区证据的县级行
+python load/techfin_load_to_db.py --allow-breakdown          # 放行拆分口径
+python load/techfin_load_to_db.py --allow-inactive-index     # 放行 retired/draft 指标
+python load/techfin_load_to_db.py --allow-unverified-evidence # 放行未定位到证据的 LLM 点
+python load/techfin_load_to_db.py --write-mode chunked       # 允许部分写入
+python load/techfin_load_to_db.py --skip-imported            # 按文件 SHA-256 跳过已导入
 python load/techfin_load_to_db.py --upsert-policy better
 python load/techfin_load_to_db.py --fail-on-error           # 有 hard 拒绝/DB 错误时退出 1
 python load/techfin_load_to_db.py --self-test               # 纯函数自测，不连库
@@ -441,6 +513,13 @@ python load/techfin_load_to_db_interactive.py
 默认预演；逐步询问数据库、输入来源、过滤策略和高级选项；执行前显示完整 loader 命令并二次确认；
 密码用 `getpass` 或环境变量读取，不进入命令行；通过子进程调用 loader，报告里的复现命令准确。
 
+选择“最新一轮 / 指定运行目录 / 指定文件”只决定**输入**；报告始终在
+`reports/db_load/<YYYY.M.D-N>/` 下新建，不再写回输入目录，也不会覆盖同名 `load_*` 文件。
+“合并所有轮次”同样新建入库报告目录；高级选项可用 `--report-dir` 指定固定目录（会覆盖同名报告）。
+
+> 在 PyCharm 的 **Run 窗口** 中，隐藏密码输入可能不可用；请改用 **Terminal**，
+> 或先设置环境变量 `TECHFIN_DB_PASSWORD`。脚本会在非交互终端自动改用可见输入并给出提示。
+
 > 默认严格模式当前可能是 **0 行写入**——这是数据质量结论（A103 系统性错配、空值、
 > 假阳性、地区串区），不是脚本故障。先看 `load_report.md` 与 `load_errors.csv` 再决定
 > 是否用 `--allow-*` 放行。
@@ -454,7 +533,8 @@ python load/techfin_load_to_db_interactive.py
 才写。因此**中途 Ctrl-C 也不丢已采数据**。
 并且**续跑台账只在数据落盘成功后才记**（台账 ⟸ 数据）——否则会出现"台账记了 ok、
 数据却不存在"的不一致，重跑时跳过它 → 数据永久缺失。
-（注：`collect/techfin_authoritative.py` 仍是"跑完一次性写"。）
+（注：`collect/techfin_authoritative.py` 仍是"跑完一次性写"数据，但新增分页进度台账
+`official_progress.csv`，重跑按"源+页 URL"跳过已成功页。）
 
 **去重键**：`article_id = md5(标题 + 链接)[:16]`，合并时 `keep="last"`。
 因此**完全相同的"标题 + 链接"不会重复入库**，且新一轮的解析结果会覆盖旧的。
@@ -489,13 +569,31 @@ unit / region_code / region_name / indicators` 这几列。**在这之前采的�
 ```
 搜索引擎每轮会把同样的头条再返回一遍，所以"采集 70 条"可能只带来"净新增 3 条"。
 
+**目录分离与版本管理**：流水线数据根 `data/` 与入库报告根 `reports/db_load/` 默认被
+`.gitignore` 忽略（体积大、可再生）；如需把根级累积库纳入版本管理，按 `.gitignore`
+注释里的白名单改为只跟踪 `data/*.csv`、`data/*.jsonl`。旧 `techfin_common_output/`
+只读保留、不跟踪。切换数据根后累积库会从零开始，原目录不会自动搬移。
+
 **数据库入库（⑦）**：以 `(region_code, year, level3_code, measure_code, context_type)` 为幂等键
 `INSERT ... ON DUPLICATE KEY UPDATE`，重复跑不会产生重复行；`missing` 行只补空、
 **不会覆盖已有 present 行**。
 
 ---
 
-## (d) 新增一个主题要做什么
+## (d) 离线回归（不联网、不连库）
+
+本次改造附带一个可重复的准确度回归，覆盖 A103 强制、地区锚点、子句级数字绑定、
+拆分口径、短别名阻断、相关性词距、URL 标题回退、loader 辅助函数：
+
+```bash
+python tests/test_accuracy_regression.py
+```
+
+`tests/fixtures/` 下是小型只读样本（几篇正文 JSON + 两份小累积库），不含 189MB 附件缓存。
+测试不写正式 `data/`；如需手工复现，可用
+`--output-dir tests/fixtures/data_cases` 跑 ③。
+
+## (e) 新增一个主题要做什么
 
 照抄本目录新建一个二级目录（如 `A/A2`），**复制整个 `A/A1` 目录结构**（各子目录
 `config/ collect/ fetch/ clean/ extract/ report/ load/` + `run_all.py` + README），然后**主要改以下五处**：
@@ -521,14 +619,15 @@ unit / region_code / region_name / indicators` 这几列。**在这之前采的�
    - 官方源清单：`SOURCES`（**栏目要选"真正发布指标内容"的**：现行是广东省科技厅
      通知公告/政策文件 + 科技部通知通告；指向"新闻/发布会"栏目的源标题里不会有指标词，
      打标会全空，详见该常量上方的实测注释）
-   - 产物契约：`OUTPUT_ROOT`（换个输出根名）、`SEARCH_ACCUMULATOR` / `OFFICIAL_ACCUMULATOR`、
-     `SEARCH_PROGRESS`（续跑台账）、`SEARCH_PREFIX` / `OFFICIAL_PREFIX`、`TOPIC_LABEL`；
+   - 产物契约：`DATA_ROOT`（流水线数据根，默认 `data`）、`LOAD_REPORT_ROOT`（入库报告根，
+     默认 `reports/db_load`）、`OUTPUT_ROOT`（`DATA_ROOT` 的兼容别名）、`SEARCH_ACCUMULATOR` / `OFFICIAL_ACCUMULATOR`、
+     `SEARCH_PROGRESS` / `OFFICIAL_PROGRESS`（续跑台账）、`SEARCH_PREFIX` / `OFFICIAL_PREFIX`、`TOPIC_LABEL`；
      以及 ②③④ 的契约：`BODY_CACHE_DIR` / `BODY_PREFIX` / `BODY_PROGRESS`、
      `POINTS_ACCUMULATOR` / `POINTS_PREFIX` / `LLM_CACHE_DIR` / `LLM_CALLS_LOG`、
      `CURATED_ACCUMULATOR` / `CURATED_UNCERTAIN` / `CURATED_DROPPED` / `CURATED_PREFIX`
 2. **两个爬虫里与该主题站点相关的解析函数**（例如 `extract_source_date`、`extract_360_item`、
    `extract_bing_item`、`parse_list_rows` 的行容器启发式）——目标站变了就要跟着改。
-3. 输出根目录名（就是 `topic_config.OUTPUT_ROOT` 那一项）。
+3. 数据根目录名（就是 `topic_config.DATA_ROOT` 那一项）。
 4. **`config/extract_config.py`**（③ 的抽取契约）：指标词族 `A101_TERMS`、数值/动词正则、
    地区别名 `REGION_ALIASES`、LLM 的 `SYSTEM_PROMPT` / `LLM_SCHEMA` / `LLM_MODEL` /
    `LLM_TRIGGER_MODE`。换指标（不只 A101）就改这里，改完重跑 ③ 即可、**不用重抓网页**。

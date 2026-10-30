@@ -25,15 +25,30 @@ pnpm-debug.log*
 .idea/
 __pycache__/
 
-# 爬取产物：每轮归档目录（形如 2026.9.27-1）内含累积总库的重复快照，
-# 会随爬取次数无限增长，故忽略；输出根下的累积总库（tech_fin_news.csv /
-# techfin_official.csv）仍纳入版本管理。
-# 模式匹配「四位年.月.日-次数」的目录名，与主题无关（A/A1、A/A2 均适用）。
-**/[0-9][0-9][0-9][0-9].[0-9]*.[0-9]*-[0-9]*/
+# 流水线数据根（A/A1/data）：累积库、正文缓存、运行目录等，体积大、可再生，默认不跟踪。
+# 如需把累积总库纳入版本管理，改用白名单：
+#   A/A1/data/*
+#   !A/A1/data/*.csv
+#   !A/A1/data/*.jsonl
+A/A1/data/
 
-# 二级抓取正文缓存与 LLM 结果缓存：体积大（含附件二进制）且可再生，不纳入版本管理。
-# 数据点累积总库（techfin_a101_points.csv）与 LLM 调用审计（a101_llm_calls.jsonl）仍跟踪。
+# ⑦ 入库报告根：与流水线数据分离，按运行目录增长，默认不跟踪。
+A/A1/reports/db_load/
+
+# 旧产物根：只读保留，不跟踪。
 A/A1/techfin_common_output/
+
+# 测试临时数据根与生成物（fixtures 源文件保留，运行产物忽略）。
+A/A1/tests/tmp_*/
+A/A1/tests/fixtures/reports/
+A/A1/tests/fixtures/**/curated_*.csv
+A/A1/tests/fixtures/**/techfin_a101_points.csv
+A/A1/tests/fixtures/**/coverage_*.csv
+A/A1/tests/fixtures/**/coverage_*.json
+A/A1/tests/fixtures/**/a101_llm_*
+
+# 运行目录命名「四位年.月.日-次数」与主题无关（A/A1、A/A2 均适用）。
+**/[0-9][0-9][0-9][0-9].[0-9]*.[0-9]*-[0-9]*/
 
 # clone的仓库的.git文件夹，避免冲突
 **/.git

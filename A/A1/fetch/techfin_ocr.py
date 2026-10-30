@@ -48,14 +48,18 @@ sys.path.insert(0, str(_TOPIC_DIR / "config"))  # → topic_config / extract_con
 # （配置目录已由上面的主题目录引导加入 sys.path）
 
 import topic_config as cfg  # noqa: E402
+from paths import (  # noqa: E402
+    finish_run_manifest,
+    new_pipeline_run,
+    pipeline_root,
+    resolve_cache_path,
+)
 from crawler_common import (  # noqa: E402
-    resolve_output_root,
-    resolve_run_dir,
     run_logging,
 )
 
 INDEX_COLS = ["article_id", "att_index", "filename", "ocr_pages", "total_pages",
-              "text_chars", "avg_conf", "seconds", "status"]
+              "text_chars", "avg_conf", "low_conf_pages", "truncated", "seconds", "status"]
 
 
 def now_str():
@@ -186,21 +190,24 @@ def _extract_list(r, key):
 
 
 def ocr_pages(ocr, pages):
-    """逐页 OCR，返回 (每页文本列表, 所有识别置信度列表)。"""
-    page_texts, confs = [], []
+    """逐页 OCR，返回 (每页文本列表, 所有置信度列表, 每页平均置信度列表)。"""
+    page_texts, confs, page_confs = [], [], []
     for arr in pages:
         try:
             res = ocr.predict(arr)
         except Exception as e:
             print(f"    [OCR异常] {type(e).__name__}: {e}")
             page_texts.append("")
+            page_confs.append(0.0)
             continue
-        lines = []
+        lines, page_conf = [], []
         for r in res:
             lines.extend(t for t in _extract_list(r, "rec_texts") if t)
-            confs.extend(c for c in _extract_list(r, "rec_scores") if c is not None)
+            page_conf.extend(c for c in _extract_list(r, "rec_scores") if c is not None)
         page_texts.append("\n".join(lines))
-    return page_texts, confs
+        page_confs.append(round(sum(page_conf) / len(page_conf), 3) if page_conf else 0.0)
+        confs.extend(page_conf)
+    return page_texts, confs, page_confs
 
 
 # ==================== 缓存扫描 ====================
@@ -238,15 +245,17 @@ def build_targets(cache, refresh):
     return targets
 
 
-def process_one(cache, aid, att_index):
+def process_one(cache, aid, att_index, cache_dir=None):
     """对单个扫描件附件做 OCR 并写回缓存。返回索引行 dict。"""
     ocr = get_ocr()
     jp, obj = cache[aid]
     att = obj["attachments"][att_index]
-    path = att.get("path", "")
+    path = (str(resolve_cache_path(cache_dir, att.get("path", ""), att.get("path_rel")))
+            if cache_dir else att.get("path", ""))
     row = {"article_id": aid, "att_index": att_index,
            "filename": att.get("filename", ""), "ocr_pages": 0, "total_pages": 0,
-           "text_chars": 0, "avg_conf": "", "seconds": 0, "status": ""}
+           "text_chars": 0, "avg_conf": "", "low_conf_pages": 0,
+           "truncated": 0, "seconds": 0, "status": ""}
     if not path or not os.path.exists(path):
         row["status"] = "附件文件缺失"
         return row
@@ -259,23 +268,35 @@ def process_one(cache, aid, att_index):
         row["seconds"] = round(time.time() - t0, 1)
         return row
 
-    page_texts, confs = ocr_pages(ocr, pages)
+    page_texts, confs, page_confs = ocr_pages(ocr, pages)
     text = _norm_block("\n\n".join(page_texts))
     text_path = att.get("text_path") or os.path.join(
         os.path.dirname(path), (att.get("sha1", "")[:12] or "ocr") + ".txt")
+    if cache_dir:
+        text_path = str(resolve_cache_path(cache_dir, text_path, att.get("text_rel")))
     atomic_write_text(text_path, text)
+    low_conf_pages = [i + 1 for i, c in enumerate(page_confs) if c < 0.8]
+    truncated = 1 if total > len(pages) else 0
+    if truncated:
+        print(f"    [警告] {att.get('filename', '')} 共 {total} 页，"
+              f"按 OCR_MAX_PAGES={cfg.OCR_MAX_PAGES} 只处理前 {len(pages)} 页")
 
     att.update({
         "text_path": text_path, "text_chars": len(text),
+        "text_rel": (os.path.relpath(text_path, cache_dir) if cache_dir else ""),
         "text_method": "paddleocr", "is_scanned": False,
         "ocr_applied": True, "ocr_pages": len(pages), "ocr_total_pages": total,
         "ocr_dpi": cfg.OCR_DPI,
         "ocr_avg_conf": (round(sum(confs) / len(confs), 3) if confs else ""),
+        "ocr_page_conf": page_confs,
+        "ocr_low_conf_pages": low_conf_pages,
+        "ocr_truncated": bool(truncated),
     })
     atomic_write_text(jp, json.dumps(obj, ensure_ascii=False, indent=1))
 
     row.update({"ocr_pages": len(pages), "text_chars": len(text),
                 "avg_conf": att["ocr_avg_conf"],
+                "low_conf_pages": len(low_conf_pages), "truncated": truncated,
                 "seconds": round(time.time() - t0, 1), "status": "ok"})
     return row
 
@@ -309,7 +330,7 @@ def run_once(run_dir, paths, cache_dir, refresh=False, limit=None):
 
     try:
         for n, (aid, i) in enumerate(targets, 1):
-            row = process_one(cache, aid, i)
+            row = process_one(cache, aid, i, cache_dir)
             rows.append(row)
             flush()                                   # 先落盘
             if row["status"] == "ok":
@@ -347,7 +368,7 @@ def artifact_paths(run_dir):
 def parse_args(argv=None):
     ap = argparse.ArgumentParser(
         description=f"{cfg.TOPIC_LABEL} · ⑤ OCR 补全（扫描件附件）")
-    ap.add_argument("--output-dir", help="输出根目录（覆盖 topic_config.OUTPUT_ROOT）")
+    ap.add_argument("--output-dir", help="数据根目录（覆盖 topic_config.DATA_ROOT）")
     ap.add_argument("--refresh", action="store_true",
                     help="忽略 ocr_applied 标记，重新 OCR")
     ap.add_argument("--limit", type=int, default=None, help="只处理前 N 个附件（试验用）")
@@ -357,18 +378,21 @@ def parse_args(argv=None):
 def main(argv=None):
     args = parse_args(argv)
     topic_dir = _TOPIC_DIR
-    out_root = resolve_output_root(topic_dir, cfg.OUTPUT_ROOT, args.output_dir)
+    out_root = pipeline_root(topic_dir, args.output_dir)
     cache_dir = str(out_root / cfg.BODY_CACHE_DIR)
-    run_dir = resolve_run_dir(out_root)
+    run_dir = new_pipeline_run("ocr", override=args.output_dir, topic_dir=topic_dir)
     paths = artifact_paths(run_dir)
+    status = "failed"
     try:
         with run_logging(paths["log"]):
-            print(f"输出根目录：{out_root}")
+            print(f"数据根目录：{out_root}")
             if not cfg.OCR_ENABLED:
                 print("[中止] topic_config.OCR_ENABLED=False，未启用 OCR。")
                 return
             run_once(run_dir, paths, cache_dir, refresh=args.refresh, limit=args.limit)
+        status = "ok"
     finally:
+        finish_run_manifest(run_dir, status=status)
         print(f"[归档] 本轮产物目录：{run_dir}")
 
 

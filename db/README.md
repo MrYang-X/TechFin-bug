@@ -301,7 +301,7 @@ ON DUPLICATE KEY UPDATE
 
 ## 8. 从现有 CSV 导入前的必读
 
-现有数据在 `A/A1/techfin_common_output/`，其中：
+现有数据在 `A/A1/data/`（旧产物保留在 `A/A1/techfin_common_output/`，只读），其中：
 
 - `points_resolved.csv`：聚合级，一行一个 `(region_code, level3_code, stat_year)` 格，列可直接映射到事实表；
 - `points_delta.csv`：证据级，保留逐篇文章的抽取结果、单位、语境、原文片段。
@@ -313,6 +313,9 @@ ON DUPLICATE KEY UPDATE
 ```
 
 原文是“2019 年广州有效期内的高新技术企业有 12099 家”，属于 A101，不是 A103。盲导会得到“A103 = 12099%”。
+
+> 2026-10 起，③ 抽取层已强制规则层只产 A101，并做指标-口径-单位一致性校验；
+> 不合格点写入 `points_dropped.csv`。loader 仍保留 `--block-level3 A103` 作为最后一道闸门。
 
 loader 必须做：
 

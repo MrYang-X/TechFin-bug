@@ -17,6 +17,38 @@ A101_TERMS = [
     "有效高新技术企业", "高新技术企业数量", "高企数量", "高企",
 ]
 
+# 指标-口径-单位契约：抽取层只允许产出这里启用的指标。
+# 这是 A103 系统性错标的根因修复之一：规则层只匹配 A101 词族，就不能继承文章级的 A103 编码。
+#   metrics：允许的 measure_code
+#   units  ：允许的观测单位（空单位不在此列，会被判为不合法并进入 points_dropped.csv）
+INDICATOR_SCOPE = {
+    "A101": {
+        "level3_name": "高新技术企业数量/密度",
+        "metrics": {"count", "density"},
+        "units": {"家", "户", "个", "家/万人", "家/万", "户/万人", "家每万人"},
+        "terms": A101_TERMS,
+    },
+    # A103 目前不由规则层产出；保留契约供 LLM/未来扩展使用，单位必须是百分比。
+    "A103": {
+        "level3_name": "R&D经费支出占GDP比重",
+        "metrics": {"share"},
+        "units": {"%", "％"},
+        "terms": [],
+    },
+}
+
+# 年份来源 → 置信度。低置信年份不进入聚合主值，只保留在证据级供复核。
+YEAR_SRC_CONF = {
+    "period": 0.95,
+    "text": 0.90,
+    "relative": 0.80,
+    "llm": 0.75,
+    "window": 0.65,
+    "doc": 0.35,
+    "article": 0.20,
+    "none": 0.0,
+}
+
 # 数量类单位（"家/户/个"）与密度类单位（"家/万人"）——数值语义靠这里区分 metric。
 COUNT_UNIT = r"(?:家|户|个)"
 DENSITY_UNIT = r"(?:家/万人|家/万|户/万人|家每万人)"
@@ -24,8 +56,10 @@ DENSITY_UNIT = r"(?:家/万人|家/万|户/万人|家每万人)"
 _NUM = r"(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?"
 # 数字 + 可选量级词 + 单位。量级词"万余/万"表示 ×10000，"余/多"表示近似。
 # 负向后视 (?<![每第]) 排除"每家""第 X 家"这类非计数的假阳性。
+# pre 把"近/超/逾/约/超过/突破"并入同一次匹配，避免与 APPROX_RE 重复产点。
 NUM_UNIT_RE = re.compile(
-    rf"(?<![每第])(?P<num>{_NUM})\s*(?P<mag>万余|万|余|多)?\s*(?P<unit>{COUNT_UNIT}|{DENSITY_UNIT})"
+    rf"(?<![每第])(?P<pre>近|超|逾|约|超过|突破|首次突破)?\s*"
+    rf"(?P<num>{_NUM})\s*(?P<mag>万余|万|余|多)?\s*(?P<unit>{COUNT_UNIT}|{DENSITY_UNIT})"
 )
 # 单位直接跟在数字后、无空格的情况（如"302家"）已被上式覆盖；此式另抓"近/超/逾/约 N 家"。
 APPROX_RE = re.compile(r"(?P<pre>近|超|逾|约|超过|突破)\s*(?P<num>\d[\d,]*(?:\.\d+)?)\s*(?P<unit>家|户|个)")
@@ -68,6 +102,19 @@ LLM_MODEL = "claude-sonnet-5-5"
 LLM_EFFORT = "medium"
 LLM_MAX_TOKENS = 8000
 PROMPT_VERSION = "a101-v2"      # 改 prompt/规则即 bump（v2：补强 stat_year 口径指引）
+
+# 每 1M tokens 的美元单价（Anthropic 第一方 API，2026-10）。
+# 仅用于运行报告里的成本估算；实际账单以控制台为准。
+LLM_PRICING = {
+    "claude-sonnet-5-5": {
+        "input": 2.00,
+        "output": 10.00,
+        "cache_read": 0.20,
+        "cache_write": 2.50,
+    },
+}
+# LLM 失败率超过该比例即中止本轮 hybrid 抽取（防止"每篇都失败还跑完全程"）。
+LLM_MAX_FAILURE_RATE = 0.2
 
 # LLM 触发模式：
 #   "any_indicator" —— 只要某篇提到 A101 指标词就调 LLM（精度优先；规则层仅作交叉印证，
@@ -170,9 +217,12 @@ POINT_COLS = [
     "level1_code", "level1_name", "level2_code", "level2_name",
     "level3_code", "level3_name",
     "metric", "region_code", "region_name", "region_level", "city_name", "region_from",
+    "region_confidence", "region_evidence",
     "value_num", "value_text", "unit", "stat_year", "stat_period", "stat_year_src",
+    "year_confidence", "year_evidence",
     "context_type", "context_cue",
-    "evidence_snippet", "evidence_source", "evidence_locator",
+    "aggregation_type", "is_breakdown",
+    "evidence_snippet", "evidence_source", "evidence_locator", "evidence_verified",
     "extract_method", "confidence", "llm_model", "llm_prompt_version", "extract_time",
 ]
 
@@ -181,7 +231,9 @@ POINT_COLS = [
 # index_value/data_quality/data_source/evidence_ref）。
 RESOLVED_COLS = [
     "region_code", "region_name", "city_name",
+    "region_from", "region_confidence", "region_evidence",
     "level3_code", "level3_name", "metric", "stat_year", "stat_year_src",
+    "year_confidence", "year_evidence", "aggregation_type",
     "canonical_value", "n_sources", "n_support", "source_article_ids",
     "value_min", "value_max", "agreement", "chosen_reason", "authority",
     "data_quality", "data_source",

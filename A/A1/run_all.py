@@ -31,6 +31,13 @@ from pathlib import Path
 
 TOPIC_DIR = Path(__file__).resolve().parent   # 本文件就在 A/A1 根，即主题目录
 
+# 引导路径：仓库根（crawler_common）与主题 config（topic_config / paths）
+_REPO_ROOT = next((p for p in TOPIC_DIR.parents if (p / "crawler_common.py").exists()), None)
+if _REPO_ROOT is not None:
+    sys.path.insert(0, str(_REPO_ROOT))
+sys.path.insert(0, str(TOPIC_DIR / "config"))
+from paths import pipeline_root  # noqa: E402
+
 # 顺序即执行顺序；limit=True 的步支持 `--limit N`
 STEPS = [
     {"key": "collect-search",   "label": "①-a 搜索引擎采集", "script": "collect/TechFin-bug.py",           "limit": True},
@@ -54,6 +61,8 @@ def parse_args(argv=None):
     ap.add_argument("--skip", nargs="*", choices=VALID_KEYS, metavar="KEY", default=[],
                     help="跳过指定步")
     ap.add_argument("--limit", type=int, help="透传给支持它的步（fetch/ocr/extract/collect-search）")
+    ap.add_argument("--output-dir", default=None,
+                    help="透传给各步，覆盖 topic_config.DATA_ROOT（默认 A/A1/data）")
     ap.add_argument("--list", action="store_true", help="只打印将按序执行的步骤，不执行")
     ap.add_argument("--no-prompt", action="store_true",
                     help="无参数时也跳过交互菜单，直接跑默认处理链（脚本/CI 用）")
@@ -157,9 +166,11 @@ def main(argv=None):
     args = parse_args(argv)
     keys = selected_keys(args)
     steps = [s for s in STEPS if s["key"] in keys]     # 按 STEPS 原始顺序
+    out_root = pipeline_root(TOPIC_DIR, args.output_dir)
 
     print("=" * 60)
     print("一键按序跑 · 将执行：")
+    print(f"  数据根：{out_root}")
     for s in steps:
         extra = "  [--limit N]" if (args.limit and s["limit"]) else ""
         print(f"  · {s['label']:16s} → {s['script']}{extra}")
@@ -168,7 +179,7 @@ def main(argv=None):
         return 0
 
     for i, s in enumerate(steps, 1):
-        cmd = [sys.executable, str(TOPIC_DIR / s["script"])]
+        cmd = [sys.executable, str(TOPIC_DIR / s["script"]), "--output-dir", str(out_root)]
         if args.limit and s["limit"]:
             cmd += ["--limit", str(args.limit)]
         print(f"\n######## [{i}/{len(steps)}] {s['label']} ########")

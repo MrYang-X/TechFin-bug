@@ -27,6 +27,7 @@
 """
 
 import argparse
+import gzip
 import hashlib
 import importlib
 import json
@@ -65,13 +66,12 @@ sys.path.insert(0, str(_TOPIC_DIR / "config"))  # → topic_config / extract_con
 # （配置目录已由上面的主题目录引导加入 sys.path）
 
 import topic_config as cfg  # noqa: E402
+from paths import finish_run_manifest, new_pipeline_run, pipeline_root  # noqa: E402
 from crawler_common import (  # noqa: E402
     append_progress,
     blocking_reason,
     get_random_headers,
     guess_encoding,
-    resolve_output_root,
-    resolve_run_dir,
     run_logging,
 )
 
@@ -456,7 +456,7 @@ def extract_attachment_text(path, ext):
 
 # ==================== 逐条处理 ====================
 
-def process_one(row, session, cache_dir, host_state, robots_cache, refresh):
+def process_one(row, session, cache_dir, host_state, robots_cache, refresh, save_html=False):
     """
     处理一条语料：抓 HTML → 抽正文 → 找附件 → 下载 → 抽附件文本 →
     组装缓存 JSON 并原子落盘。返回 (索引行 dict, status)。
@@ -492,10 +492,13 @@ def process_one(row, session, cache_dir, host_state, robots_cache, refresh):
             path = os.path.join(att_dir, f"{sha1[:12]}.pdf")
             atomic_write_bytes(path, resp.content)
             body_text, body_method, scanned = extract_attachment_text(path, ".pdf")
+            text_path = path[:-4] + ".txt"
             attachments.append({"url": final_url, "filename": os.path.basename(
                 urlparse(final_url).path) or "inline.pdf", "ext": ".pdf",
-                "path": path, "sha1": sha1, "bytes": len(resp.content),
-                "status": "ok", "text_path": path[:-4] + ".txt",
+                "path": path, "path_rel": os.path.relpath(path, cache_dir),
+                "sha1": sha1, "bytes": len(resp.content),
+                "status": "ok", "text_path": text_path,
+                "text_rel": os.path.relpath(text_path, cache_dir),
                 "text_chars": len(body_text), "text_method": body_method,
                 "is_scanned": scanned})
             atomic_write_text(path[:-4] + ".txt", body_text)
@@ -507,6 +510,15 @@ def process_one(row, session, cache_dir, host_state, robots_cache, refresh):
                 print(f"    [拦截] {blocked} ← {url[:80]}")
             else:
                 body_text, body_method = extract_main_text(resp.text)
+                if save_html:
+                    raw_dir = os.path.join(cache_dir, "raw_html")
+                    os.makedirs(raw_dir, exist_ok=True)
+                    raw_path = os.path.join(raw_dir, f"{aid}.html.gz")
+                    try:
+                        with gzip.open(raw_path, "wt", encoding="utf-8") as f:
+                            f.write(resp.text)
+                    except OSError as exc:
+                        print(f"    [警告] 保存原始 HTML 失败：{exc}")
                 # 找附件并下载
                 att_dir = os.path.join(cache_dir, "attach", aid)
                 for att in find_attachments(resp.text, final_url):
@@ -517,10 +529,13 @@ def process_one(row, session, cache_dir, host_state, robots_cache, refresh):
                         txt_path = os.path.join(att_dir, rec["sha1"][:12] + ".txt")
                         atomic_write_text(txt_path, txt)
                         rec.update({"text_path": txt_path, "text_chars": len(txt),
-                                    "text_method": tmethod, "is_scanned": scanned})
+                                    "text_method": tmethod, "is_scanned": scanned,
+                                    "path_rel": os.path.relpath(rec["path"], cache_dir),
+                                    "text_rel": os.path.relpath(txt_path, cache_dir)})
                     else:
                         rec.update({"text_path": "", "text_chars": 0,
-                                    "text_method": "", "is_scanned": False})
+                                    "text_method": "", "is_scanned": False,
+                                    "path_rel": "", "text_rel": ""})
                     attachments.append(rec)
                 status = OK_STATUS if body_text else "no_body"
 
@@ -637,7 +652,7 @@ def load_curated_queue(out_root):
     return {i for i in ids if str(i).strip()}
 
 
-def run_once(run_dir, paths, cache_dir, targets, refresh=False):
+def run_once(run_dir, paths, cache_dir, targets, refresh=False, save_html=False):
     print("=" * 60)
     print(f"{cfg.TOPIC_LABEL} · ② 二级抓取（正文 + 文字型附件）")
     print("=" * 60)
@@ -670,7 +685,8 @@ def run_once(run_dir, paths, cache_dir, targets, refresh=False):
                 continue
             try:
                 index_row, status = process_one(
-                    row, session, cache_dir, host_state, robots_cache, refresh)
+                    row, session, cache_dir, host_state, robots_cache, refresh,
+                    save_html=save_html)
             except KeyboardInterrupt:
                 raise
             except Exception as e:
@@ -723,7 +739,7 @@ def parse_args(argv=None):
     ap = argparse.ArgumentParser(
         description=f"{cfg.TOPIC_LABEL} · ② 二级抓取（正文 + 文字型附件）")
     ap.add_argument("--output-dir",
-                    help="输出根目录（覆盖 topic_config.OUTPUT_ROOT）")
+                    help="数据根目录（覆盖 topic_config.DATA_ROOT）")
     ap.add_argument("--kinds", nargs="*", default=["search", "official"],
                     help="抓哪些语料：search / official（默认两者）")
     ap.add_argument("--limit", type=int, default=None, help="本轮最多抓前 N 条")
@@ -733,13 +749,16 @@ def parse_args(argv=None):
     ap.add_argument("--from-curated", action="store_true",
                     help="只抓 ④ 挑出的待抓队列（相关但无正文 + 泛化标题待确认），"
                          "不再盲抓整库；需先运行 techfin_curate.py")
+    ap.add_argument("--save-html", action="store_true",
+                    help="额外保存原始 HTML 的 gzip 快照（body_cache/raw_html/<aid>.html.gz），"
+                         "便于换抽取器后重放；默认关闭")
     return ap.parse_args(argv)
 
 
 def main(argv=None):
     args = parse_args(argv)
     topic_dir = _TOPIC_DIR
-    out_root = resolve_output_root(topic_dir, cfg.OUTPUT_ROOT, args.output_dir)
+    out_root = pipeline_root(topic_dir, args.output_dir)
     cache_dir = str(out_root / cfg.BODY_CACHE_DIR)
 
     targets = load_targets(out_root, kinds=args.kinds,
@@ -753,13 +772,17 @@ def main(argv=None):
         print("[中止] 没有可抓的语料（请先运行 TechFin-bug.py / techfin_authoritative.py）。")
         return
 
-    run_dir = resolve_run_dir(out_root)
+    run_dir = new_pipeline_run("fetch", override=args.output_dir, topic_dir=topic_dir)
     paths = artifact_paths(run_dir)
+    status = "failed"
     try:
         with run_logging(paths["log"]):
-            print(f"输出根目录：{out_root}")
-            run_once(run_dir, paths, cache_dir, targets, refresh=args.refresh)
+            print(f"数据根目录：{out_root}")
+            run_once(run_dir, paths, cache_dir, targets, refresh=args.refresh,
+                     save_html=args.save_html)
+        status = "ok"
     finally:
+        finish_run_manifest(run_dir, status=status)
         print(f"[归档] 本轮产物目录：{run_dir}")
 
 

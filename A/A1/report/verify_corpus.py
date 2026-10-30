@@ -45,10 +45,10 @@ sys.path.insert(0, str(_TOPIC_DIR / "config"))  # → topic_config / extract_con
 # （配置目录已由上面的主题目录引导加入 sys.path）
 
 import topic_config as cfg  # noqa: E402  （须在 sys.path 引导之后导入）
+from paths import pipeline_root  # noqa: E402
 from crawler_common import (  # noqa: E402
     RUN_DIR_RE,
     clean_text,
-    resolve_output_root,
 )
 
 # ==================== 配置区 ====================
@@ -409,8 +409,8 @@ def parse_args(argv=None):
         description=f"{cfg.TOPIC_LABEL} · 语料交叉印证："
                     f"比对搜索引擎语料与官方政策源语料")
     ap.add_argument("--output-dir",
-                    help="输出根目录（覆盖 topic_config.OUTPUT_ROOT）。"
-                         "相对路径锚定到本脚本所在目录")
+                    help="数据根目录（覆盖 topic_config.DATA_ROOT）。"
+                         "相对路径锚定到本主题目录")
     return ap.parse_args(argv)
 
 
@@ -421,8 +421,8 @@ def main(argv=None):
     print("=" * 60)
 
     topic_dir = _TOPIC_DIR
-    out_root = resolve_output_root(topic_dir, cfg.OUTPUT_ROOT, args.output_dir)
-    print(f"输出根目录：{out_root}")
+    out_root = pipeline_root(topic_dir, args.output_dir)
+    print(f"数据根目录：{out_root}")
 
     search_path, search_dir = resolve_corpus("search", out_root)
     official_path, official_dir = resolve_corpus("official", out_root)

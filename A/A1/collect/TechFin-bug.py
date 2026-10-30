@@ -20,6 +20,7 @@
 """
 
 import argparse
+import json
 import os
 import random
 import re
@@ -56,6 +57,7 @@ sys.path.insert(0, str(_TOPIC_DIR / "config"))  # → topic_config / extract_con
 # （配置目录已由上面的主题目录引导加入 sys.path）
 
 import topic_config as cfg  # noqa: E402  （须在 sys.path 引导之后导入）
+from paths import finish_run_manifest, new_pipeline_run, pipeline_root  # noqa: E402
 from crawler_common import (  # noqa: E402
     append_progress,
     blocking_reason,
@@ -76,8 +78,6 @@ from crawler_common import (  # noqa: E402
     normalize_url,
     print_quality_report,
     random_delay,
-    resolve_output_root,
-    resolve_run_dir,
     run_logging,
 )
 
@@ -472,6 +472,7 @@ def crawl_all_keywords(plans, max_pages=3, resolve_url=False,
         "failed_pages": 0,
         "failed_by_source": {},
         "resumed_skipped": 0,
+        "plan_results": [],
     }
 
     total = len(plans)
@@ -506,11 +507,32 @@ def crawl_all_keywords(plans, max_pages=3, resolve_url=False,
             # 否则某源跳闸后，剩余上千条检索式会以 3~5s 的间隔空跑一遍，纯浪费（实测踩过）。
             active = [s for s in plan_sources if not _throttle_state(s)["tripped"]]
             if not active:
+                for s in plan_sources:
+                    stats["plan_results"].append({
+                        "region_code": plan.get("region_code", ""),
+                        "region_name": plan.get("region_name", ""),
+                        "level3_code": plan.get("level3_code", ""),
+                        "level3_name": plan.get("level3_name", ""),
+                        "query": kw, "source": s,
+                        "status": "tripped", "n_items": 0,
+                    })
                 if plan_sources and not idle_noted:
                     print(f"\n[跳过] 从第 {idx} 条起，其全部源均已跳闸，"
                           f"后续检索式不再请求、也不再空等，本轮到此基本结束。")
                     idle_noted = True
                 continue
+
+            # 部分源已跳闸：记录 tripped，避免被后处理误标成 not_run
+            for s in plan_sources:
+                if s not in active:
+                    stats["plan_results"].append({
+                        "region_code": plan.get("region_code", ""),
+                        "region_name": plan.get("region_name", ""),
+                        "level3_code": plan.get("level3_code", ""),
+                        "level3_name": plan.get("level3_name", ""),
+                        "query": kw, "source": s,
+                        "status": "tripped", "n_items": 0,
+                    })
 
             where = plan["region_name"] or "（无地区）"
             print(f"\n[{idx}/{total}] {where} · {plan['level3_name']}")
@@ -521,6 +543,14 @@ def crawl_all_keywords(plans, max_pages=3, resolve_url=False,
                 if progress_path and (source_name, plan_key) in done:
                     stats["resumed_skipped"] += 1
                     stats["skipped_by_source"][source_name] += 1
+                    stats["plan_results"].append({
+                        "region_code": plan.get("region_code", ""),
+                        "region_name": plan.get("region_name", ""),
+                        "level3_code": plan.get("level3_code", ""),
+                        "level3_name": plan.get("level3_name", ""),
+                        "query": kw, "source": source_name,
+                        "status": "skipped_resume", "n_items": 0,
+                    })
                     print(f"  -- 源：{label} [续跑] 该检索式已采过，跳过")
                     continue
 
@@ -563,7 +593,8 @@ def crawl_all_keywords(plans, max_pages=3, resolve_url=False,
                         if not is_relevant(combined, kw, cfg.CORE_TERMS,
                                                  cfg.QUALIFIER_TERMS,
                                                  plan.get("anchor_terms", ()),
-                                                 required_terms=required):
+                                                 required_terms=required,
+                                                 max_token_gap=cfg.RELEVANCE_MAX_TOKEN_GAP):
                             stats["irrelevant_dropped"] += 1
                             continue
 
@@ -616,6 +647,16 @@ def crawl_all_keywords(plans, max_pages=3, resolve_url=False,
                                                          cfg.DELAY_DEFAULT)
                     random_delay(dmin, dmax)
 
+                status = "failed" if source_failed else ("ok" if source_new > 0 else "ok_zero")
+                stats["plan_results"].append({
+                    "region_code": plan.get("region_code", ""),
+                    "region_name": plan.get("region_name", ""),
+                    "level3_code": plan.get("level3_code", ""),
+                    "level3_name": plan.get("level3_name", ""),
+                    "query": kw, "source": source_name,
+                    "status": status, "n_items": source_new,
+                })
+
                 if not source_failed:
                     stats["ok_by_source"][source_name] += 1
                     # 成功采完 → 排队记台账；等本条检索式的数据落盘后再写（见 _flush_and_log）
@@ -636,10 +677,89 @@ def crawl_all_keywords(plans, max_pages=3, resolve_url=False,
         _flush_and_log()
 
     stats["interrupted"] = interrupted
+
+    # 未执行到的检索式标 not_run（中断/提前结束时也能在覆盖率里看见）
+    seen = {(r["region_code"], r["level3_code"], r["query"], r["source"])
+            for r in stats["plan_results"]}
+    for plan in plans:
+        level = "county" if plan.get("region_code") else "none"
+        allowed = cfg.SOURCES_BY_REGION_LEVEL.get(level, tuple(enabled))
+        for source_name in [s for s in enabled if s in allowed]:
+            key = (plan.get("region_code", ""), plan.get("level3_code", ""),
+                   plan.get("query", ""), source_name)
+            if key not in seen:
+                stats["plan_results"].append({
+                    "region_code": plan.get("region_code", ""),
+                    "region_name": plan.get("region_name", ""),
+                    "level3_code": plan.get("level3_code", ""),
+                    "level3_name": plan.get("level3_name", ""),
+                    "query": plan.get("query", ""), "source": source_name,
+                    "status": "not_run", "n_items": 0,
+                })
     return list(by_id.values()), stats
 
 
 # ==================== 主流程 ====================
+
+def write_coverage(run_dir, out_root, stats, plans):
+    """
+    把逐检索式采集状态落盘，回答"没采到 vs 确实没有"：
+      - run_dir/coverage_report.json：逐检索式状态
+      - out_root/coverage_by_region.csv：按县级单元汇总
+      - out_root/coverage_latest.json：最近一轮汇总
+      - out_root/eval/coverage_history.csv：每轮追加一行
+    """
+    results = stats.get("plan_results", [])
+    if not results:
+        return
+    try:
+        df = pd.DataFrame(results)
+        status_counts = {str(k): int(v) for k, v in df["status"].value_counts().items()}
+        by_source = {}
+        for source, part in df.groupby("source"):
+            by_source[str(source)] = {str(k): int(v) for k, v in part["status"].value_counts().items()}
+        report = {
+            "generated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "total_plans": len(plans),
+            "status_counts": status_counts,
+            "by_source": by_source,
+            "plan_results": results,
+        }
+        with open(os.path.join(run_dir, "coverage_report.json"), "w", encoding="utf-8") as f:
+            json.dump(report, f, ensure_ascii=False, indent=2)
+        with open(os.path.join(out_root, "coverage_latest.json"), "w", encoding="utf-8") as f:
+            json.dump({k: report[k] for k in
+                       ("generated_at", "total_plans", "status_counts", "by_source")},
+                      f, ensure_ascii=False, indent=2)
+
+        rows = []
+        for (code, name), part in df.groupby(["region_code", "region_name"], dropna=False):
+            rows.append({
+                "region_code": code, "region_name": name,
+                "plans": len(part),
+                "ok": int((part["status"] == "ok").sum()),
+                "ok_zero": int((part["status"] == "ok_zero").sum()),
+                "failed": int((part["status"] == "failed").sum()),
+                "skipped_resume": int((part["status"] == "skipped_resume").sum()),
+                "tripped": int((part["status"] == "tripped").sum()),
+                "not_run": int((part["status"] == "not_run").sum()),
+                "items": int(part["n_items"].sum()),
+            })
+        pd.DataFrame(rows).to_csv(os.path.join(out_root, "coverage_by_region.csv"),
+                                  index=False, encoding="utf-8-sig")
+
+        eval_dir = os.path.join(out_root, "eval")
+        os.makedirs(eval_dir, exist_ok=True)
+        history = os.path.join(eval_dir, "coverage_history.csv")
+        header = not os.path.exists(history)
+        pd.DataFrame([{
+            "ts": report["generated_at"], "run_dir": os.path.basename(run_dir),
+            "total_plans": len(plans), **{f"status_{k}": v for k, v in status_counts.items()},
+        }]).to_csv(history, mode="a", header=header, index=False, encoding="utf-8-sig")
+        print(f"[覆盖率] 逐检索式状态 → {os.path.join(run_dir, 'coverage_report.json')}")
+    except Exception as exc:
+        print(f"[警告] 写覆盖率报告失败（不影响采集）：{exc}")
+
 
 def backfill_legacy_engine(df):
     """
@@ -757,6 +877,7 @@ def run_once(run_dir, paths, accumulator, plans, enabled_sources=None,
     )
 
     print_coverage(stats, len(plans))
+    write_coverage(run_dir, os.path.dirname(str(accumulator)), stats, plans)
 
     if stats.get("interrupted"):
         print("\n[中断] 已中断；**已采数据已随采集过程增量落盘**（不是跑完才写），"
@@ -801,7 +922,7 @@ def parse_args(argv=None):
     ap = argparse.ArgumentParser(
         description=f"{cfg.TOPIC_LABEL} · 指标化搜索引擎语料采集")
     ap.add_argument("--output-dir",
-                    help="输出根目录（覆盖 topic_config.OUTPUT_ROOT）。"
+                    help="数据根目录（覆盖 topic_config.DATA_ROOT）。"
                          "相对路径锚定到本脚本所在目录，也可写绝对路径把"
                          "数据放到仓库外")
     ap.add_argument("--level2", nargs="*", default=["A1"],
@@ -853,22 +974,25 @@ def main(argv=None):
         print("[中止] 检索计划为空，请检查 --level2 / --cities 参数。")
         return
 
-    # 一切路径锚定到脚本自身位置，不依赖当前工作目录——
-    # 这样从任何地方执行，产物都稳定落在本主题的输出根下。
+    # 一切路径锚定到主题目录，不依赖当前工作目录——
+    # 这样从任何地方执行，产物都稳定落在本主题的数据根下。
     topic_dir = _TOPIC_DIR
-    out_root = resolve_output_root(topic_dir, cfg.OUTPUT_ROOT, args.output_dir)
+    out_root = pipeline_root(topic_dir, args.output_dir)
     accumulator = out_root / cfg.SEARCH_ACCUMULATOR
     progress_path = out_root / cfg.SEARCH_PROGRESS
 
-    run_dir = resolve_run_dir(out_root)
+    run_dir = new_pipeline_run("collect-search", override=args.output_dir, topic_dir=topic_dir)
     paths = artifact_paths(run_dir)
+    status = "failed"
     try:
         with run_logging(paths["log"]):
-            print(f"输出根目录：{out_root}")
+            print(f"数据根目录：{out_root}")
             run_once(run_dir, paths, accumulator, plans,
                      enabled_sources=args.sources,
                      progress_path=progress_path, fresh=args.fresh)
+        status = "ok"
     finally:
+        finish_run_manifest(run_dir, status=status)
         # 此处 stdout 已恢复，只作提示不写入日志；崩溃时尤其需要知道存到哪了
         print(f"[归档] 本轮产物目录：{run_dir}")
 

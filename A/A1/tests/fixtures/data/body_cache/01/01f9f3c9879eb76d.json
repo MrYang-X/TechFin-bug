@@ -1,0 +1,43 @@
+{
+ "article_id": "01f9f3c9879eb76d",
+ "status": "ok",
+ "http_status": 200,
+ "page_type": "html",
+ "fetch_url": "https://www.most.gov.cn/tztg/202412/t20241227_192795.html",
+ "final_url": "https://www.most.gov.cn/tztg/202412/t20241227_192795.html",
+ "body_text": "www.most.gov.cn\n \n 工业和信息化部办公厅 科技部办公厅关于公布国家自主创新示范区2024年政策试点“揭榜挂帅”入围单位名单的通知\n \n \n \n 日期：\n 2024年12月27日 16:35 \n \n \n 来源：科技部\n \n \n各省、自治区、直辖市及计划单列市国家自主创新示范区管理部门，各国家自主创新示范区：\n为贯彻落实党中央、国务院决策部署，推动国家自主创新示范区（以下简称自创区）进一步全面深化改革，更好发挥先行先试作用，工业和信息化部联合科技部组织开展自创区政策试点“揭榜挂帅”工作。经专家论证和遴选，确定了自创区政策试点“揭榜挂帅”入围单位名单，现予以公布，有关事项通知如下。\n一、各自创区管理部门要高度重视政策试点“揭榜挂帅”工作，加强组织领导，强化要素保障，及时协调并解决试点任务实施过程中发现的问题，统筹做好本区域内自创区政策试点的实施工作，并定期报告试点进展情况。\n二、各自创区要充分发扬首创精神，强化对试点任务的落实，按照政策试点实施方案的总体目标、重点任务及进度安排，有序推进试点工作，力争突破一批创新体制机制瓶颈，形成一批可复制可推广的政策成果。\n工业和信息化部、科技部将对政策试点组织中期评估和总结评估，定期遴选典型案例，对于试点成熟的政策，按程序在全国推广。\n附件：国家自主创新示范区政策试点“揭榜挂帅”入围揭榜单位建议名单\n工业和信息化部办公厅 科技部办公厅\n2024年12月26日\n扫一扫在手机打开当前页",
+ "body_method": "trafilatura",
+ "body_chars": 625,
+ "attachments": [
+  {
+   "url": "https://www.most.gov.cn/tztg/202412/W020241227598292508866.docx",
+   "filename": "w020241227598292508866.docx",
+   "ext": ".docx",
+   "path": "E:\\Python\\bug\\A\\A1\\techfin_common_output\\body_cache\\attach\\01f9f3c9879eb76d\\a40e41aa2d8e.docx",
+   "sha1": "a40e41aa2d8e8634d0f1480a0220ed4514428c62",
+   "bytes": 22737,
+   "status": "ok",
+   "kind": "zip",
+   "text_path": "E:\\Python\\bug\\A\\A1\\techfin_common_output\\body_cache\\attach\\01f9f3c9879eb76d\\a40e41aa2d8e.txt",
+   "text_chars": 764,
+   "text_method": "zip-docx",
+   "is_scanned": false
+  }
+ ],
+ "meta": {
+  "article_id": "01f9f3c9879eb76d",
+  "title": "工业和信息化部办公厅 科技部办公厅关于公布国家自主创新示范区2024年政策试点“揭榜挂帅”入围单位名单的通知",
+  "url": "https://www.most.gov.cn/tztg/202412/t20241227_192795.html",
+  "real_url": "",
+  "source": "科技部·通知通告",
+  "date": "2024-12-27",
+  "keyword": "",
+  "level3_code": "",
+  "level3_name": "",
+  "unit": "",
+  "region_code": "",
+  "region_name": "",
+  "kind": "official"
+ },
+ "fetch_time": "2026-10-19 15:52:26"
+}

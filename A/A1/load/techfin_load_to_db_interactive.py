@@ -36,7 +36,11 @@ from pathlib import Path
 # ---- 定位主题目录与 loader ----
 _TOPIC_DIR = Path(__file__).resolve().parents[1]          # A/A1
 _LOADER = Path(__file__).resolve().parent / "techfin_load_to_db.py"
-_OUT_ROOT = _TOPIC_DIR / "techfin_common_output"
+# 实际根由 config/paths.py 解析（见下方 sys.path 引导后）；这里先给新数据根兜底。
+_OUT_ROOT = _TOPIC_DIR / "data"
+_LOAD_ROOT = _TOPIC_DIR / "reports" / "db_load"
+_OUT_OVERRIDE: str | None = None      # 命令行 --output-dir
+_REPORT_OVERRIDE: str | None = None   # 命令行 --report-root
 
 # 复用仓库根 crawler_common 的运行目录正则；找不到时退回本地等价正则
 _REPO_ROOT = None
@@ -46,10 +50,17 @@ for _p in Path(__file__).resolve().parents:
         break
 if _REPO_ROOT is not None:
     sys.path.insert(0, str(_REPO_ROOT))
+    sys.path.insert(0, str(_TOPIC_DIR / "config"))  # → topic_config / paths
     try:
         from crawler_common import RUN_DIR_RE  # noqa: E402
     except Exception:
         RUN_DIR_RE = re.compile(r"^(\d{4})\.(\d{1,2})\.(\d{1,2})-(\d+)$")
+    try:
+        from paths import load_report_root, pipeline_root  # noqa: E402
+        _OUT_ROOT = pipeline_root(_TOPIC_DIR)
+        _LOAD_ROOT = load_report_root(_TOPIC_DIR)
+    except Exception as exc:  # 新路径模块不可用时退回旧根，保证脚本仍能启动
+        print(f"[提示] 无法加载 config/paths.py（{exc}），退回旧输出根。")
 else:
     RUN_DIR_RE = re.compile(r"^(\d{4})\.(\d{1,2})\.(\d{1,2})-(\d+)$")
 
@@ -120,6 +131,33 @@ def ask_choice(question: str, options: list[tuple[str, str]], default: int = 1) 
         print(f"  编号必须在 1—{len(options)} 之间。")
 
 
+def is_tty() -> bool:
+    try:
+        return bool(sys.stdin and sys.stdin.isatty())
+    except Exception:
+        return False
+
+
+def read_password() -> str:
+    """
+    读取 MySQL 密码。
+
+    为什么不能直接 getpass：
+      PyCharm 的 Run 窗口等非 TTY 环境里，getpass 的提示可能写到不可见的 stderr，
+      或触发 GetPassWarning 后回退到没有提示的 input，用户会以为程序卡死。
+    这里先打印并 flush 明确提示，再按 TTY 情况选择隐藏输入或可见输入。
+    """
+    print("\n--- 密码 ---")
+    print("输入 MySQL 密码(在支持的终端里输入不会回显)")
+    print("直接回车 = 空密码。", flush=True)
+
+    if is_tty():
+        # 提示已经由上面的 print 输出并 flush；这里传空 prompt，避免提示被 stderr 吞掉
+        return getpass.getpass("")
+
+    return input("密码: ")
+
+
 # ==================== 路径与运行目录 ====================
 
 def run_order(name: str) -> tuple[int, int, int, int]:
@@ -181,9 +219,10 @@ def collect_db_config() -> tuple[list[str], dict[str, str], dict[str, str]]:
         if ask_yes_no(f"使用环境变量 {PASSWORD_ENV} 中的密码？", True):
             env[PASSWORD_ENV] = os.environ[PASSWORD_ENV]
         else:
-            env[PASSWORD_ENV] = getpass.getpass("MySQL 密码（直接回车 = 空密码）：")
+            env[PASSWORD_ENV] = read_password()
     else:
-        env[PASSWORD_ENV] = getpass.getpass("MySQL 密码（直接回车 = 空密码）：")
+        print(f"[提示] 未检测到 {PASSWORD_ENV}；下一步将要求输入密码。")
+        env[PASSWORD_ENV] = read_password()
 
     args = [
         "--database", database,
@@ -195,7 +234,7 @@ def collect_db_config() -> tuple[list[str], dict[str, str], dict[str, str]]:
     return args, env, info
 
 
-def collect_input_choice() -> tuple[list[str] | None, str]:
+def collect_input_choice() -> tuple[list[str] | None, str, Path | None]:
     print("\n--- 输入来源 ---")
     choice = ask_choice(
         "输入来源：",
@@ -209,11 +248,22 @@ def collect_input_choice() -> tuple[list[str] | None, str]:
     )
 
     args: list[str] = []
-    if choice == "run":
+    report_dir: Path | None = None
+
+    if choice == "latest":
         runs = discover_runs()
         if not runs:
             print("[提示] 未找到 points_resolved.csv，请先运行 ③ 数值抽取。")
-            return None, ""
+            return None, "", None
+        # 显式钉住“当前最新一轮”作为输入；报告始终由 loader 在入库报告根下新建
+        path = runs[-1][1].parent
+        args += ["--input-dir", str(path)]
+        label = f"最新一轮 {path.name}"
+    elif choice == "run":
+        runs = discover_runs()
+        if not runs:
+            print("[提示] 未找到 points_resolved.csv，请先运行 ③ 数值抽取。")
+            return None, "", None
         options = [(name, f"{name}（{rows} 行）") for name, _path, rows in runs]
         selected = ask_choice("选择运行目录：", options, default=len(options))
         path = _OUT_ROOT / selected
@@ -223,7 +273,7 @@ def collect_input_choice() -> tuple[list[str] | None, str]:
         while True:
             text = ask_optional("points_resolved.csv 路径", "直接回车 = 返回上一步")
             if not text:
-                return None, ""
+                return None, "", None
             path = resolve_input_path(text)
             if path.is_file():
                 args += ["--input-file", str(path)]
@@ -233,6 +283,7 @@ def collect_input_choice() -> tuple[list[str] | None, str]:
     elif choice == "all":
         args.append("--all-runs")
         label = "合并所有轮次"
+        print("[提示] 合并所有轮次没有单一输入目录，默认新建运行目录；可在高级选项指定报告目录。")
     else:
         label = "最新一轮"
 
@@ -240,7 +291,7 @@ def collect_input_choice() -> tuple[list[str] | None, str]:
     if limit is not None:
         args += ["--limit", str(limit)]
         label += f"，limit={limit}"
-    return args, label
+    return args, label, report_dir
 
 
 def collect_filter_args() -> tuple[list[str], str]:
@@ -280,10 +331,10 @@ def collect_filter_args() -> tuple[list[str], str]:
     return args, "严格" + (" + " + " + ".join(labels) if labels else "")
 
 
-def collect_advanced_args() -> tuple[list[str], str]:
+def collect_advanced_args(default_report_dir: Path | None) -> tuple[list[str], str, Path | None]:
     print("\n--- 高级选项 ---")
     if not ask_yes_no("是否进入高级选项？", False):
-        return [], "默认"
+        return [], "默认", default_report_dir
 
     args: list[str] = []
     labels: list[str] = []
@@ -304,11 +355,17 @@ def collect_advanced_args() -> tuple[list[str], str]:
     args += ["--batch-size", str(batch)]
     labels.append(f"batch={batch}")
 
-    report = ask_optional("报告目录 --report-dir", "直接回车 = 自动新建运行目录")
+    hint = (
+        f"直接回车 = {default_report_dir}"
+        if default_report_dir
+        else f"直接回车 = 自动新建入库报告目录（{_LOAD_ROOT}）"
+    )
+    report = ask_optional("报告目录 --report-dir", hint)
     if report:
-        path = resolve_input_path(report)
-        args += ["--report-dir", str(path)]
-        labels.append(f"report={path}")
+        report_dir = resolve_input_path(report)
+        labels.append(f"report={report_dir}")
+    else:
+        report_dir = default_report_dir
 
     points = ask_optional("证据级文件 --points-file", "直接回车 = 自动")
     if points:
@@ -332,24 +389,30 @@ def collect_advanced_args() -> tuple[list[str], str]:
         args.append("--fail-on-error")
         labels.append("fail-on-error")
 
-    return args, " + ".join(labels) if labels else "默认"
+    return args, (" + ".join(labels) if labels else "默认"), report_dir
 
 
 def build_run(mode: str) -> tuple[list[str], dict[str, str], dict[str, str]] | None:
     """mode = dry | write。返回 (loader argv, 子进程 env, 确认摘要)。"""
     db_args, env, db_info = collect_db_config()
 
-    input_args, input_label = collect_input_choice()
+    input_args, input_label, auto_report_dir = collect_input_choice()
     if input_args is None:
         return None
 
     filter_args, filter_label = collect_filter_args()
-    advanced_args, advanced_label = collect_advanced_args()
+    advanced_args, advanced_label, report_dir = collect_advanced_args(auto_report_dir)
 
     argv: list[str] = []
     if mode == "dry":
         argv.append("--dry-run")
     argv += db_args + input_args + filter_args + advanced_args
+    if _OUT_OVERRIDE:
+        argv += ["--output-dir", _OUT_OVERRIDE]
+    if _REPORT_OVERRIDE:
+        argv += ["--report-root", _REPORT_OVERRIDE]
+    if report_dir is not None:
+        argv += ["--report-dir", str(report_dir)]
 
     summary = {
         "database": db_info["database"],
@@ -360,6 +423,7 @@ def build_run(mode: str) -> tuple[list[str], dict[str, str], dict[str, str]] | N
         "input": input_label,
         "filter": filter_label,
         "advanced": advanced_label,
+        "report": str(report_dir) if report_dir is not None else f"自动新建入库报告目录（{_LOAD_ROOT}）",
     }
     return argv, env, summary
 
@@ -376,6 +440,7 @@ def confirm(argv: list[str], summary: dict[str, str]) -> bool:
     print(f"输入：{summary['input']}")
     print(f"过滤：{summary['filter']}")
     print(f"高级：{summary['advanced']}")
+    print(f"报告目录：{summary['report']}")
     print("=" * 60)
     if summary["mode"].startswith("实际写入"):
         print("[注意] 你将写入数据库；建议先跑一次预演。")
@@ -409,7 +474,8 @@ def print_header() -> None:
     print("科技金融指数研究 · ⑦ 交互式 CSV → MySQL 入库")
     print("=" * 60)
     print(f"loader：{_LOADER}")
-    print(f"输出根：{_OUT_ROOT}")
+    print(f"数据根：{_OUT_ROOT}")
+    print(f"入库报告根：{_LOAD_ROOT}")
 
 
 def menu_loop() -> int:
@@ -455,10 +521,20 @@ def menu_loop() -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    global _OUT_ROOT, _LOAD_ROOT, _OUT_OVERRIDE, _REPORT_OVERRIDE
     parser = argparse.ArgumentParser(
         description="科技金融指数研究 · ⑦ 交互式 CSV → MySQL 入库入口",
     )
-    parser.parse_args(argv)  # 仅支持 --help；其余参数不开放
+    parser.add_argument("--output-dir", default=None, help="覆盖流水线数据根（topic_config.DATA_ROOT）")
+    parser.add_argument("--report-root", default=None, help="覆盖入库报告根（topic_config.LOAD_REPORT_ROOT）")
+    args = parser.parse_args(argv)
+    _OUT_OVERRIDE = args.output_dir
+    _REPORT_OVERRIDE = args.report_root
+    if "pipeline_root" in globals():
+        _OUT_ROOT = pipeline_root(_TOPIC_DIR, _OUT_OVERRIDE)
+        _LOAD_ROOT = load_report_root(_TOPIC_DIR, _REPORT_OVERRIDE)
+    if PASSWORD_ENV not in os.environ:
+        print(f"[提示] 未检测到 {PASSWORD_ENV}；数据库配置步骤会要求输入密码。")
     try:
         return menu_loop()
     except (EOFError, KeyboardInterrupt):

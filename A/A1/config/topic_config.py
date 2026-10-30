@@ -662,8 +662,14 @@ NOISE_DOMAINS = [
     "eastmoney.com",
 ]
 NOISE_SOURCES = ["百度百科", "雪球", "东方财富"]
-# 非新闻文件类型（如教材PDF）
-NOISE_URL_SUFFIXES = [".pdf"]
+# 非新闻文件类型：只挡可执行包/压缩包，**不再把 .pdf 一刀切当噪声**。
+# 政策文件、统计公报、名单公示大量是 PDF，② 已支持 PDF 正文/附件解析；
+# 旧规则会把最有价值的官方 PDF 直接丢掉。
+NOISE_URL_SUFFIXES = [".exe", ".zip", ".rar", ".7z"]
+
+# 多词检索式的 token 共现窗口（字符）。0 = 不做词距约束（旧行为）。
+# 县级检索式常出现"标题有地区、摘要远处有指标"的松散匹配，80 字可挡住大部分。
+RELEVANCE_MAX_TOKEN_GAP = 80
 
 # ==================== 采集范围与节奏 ====================
 
@@ -781,9 +787,21 @@ SOURCES = [
 
 # ==================== 产物契约 ====================
 
-# 输出根目录（相对本主题目录；也可写绝对路径把数据放到仓库外）。
+# 流水线数据根（相对本主题目录；也可写绝对路径把数据放到仓库外）。
 # 可用命令行 --output-dir 临时覆盖。
-OUTPUT_ROOT = "techfin_common_output"
+# 目录分离说明：
+#   - data/           流水线数据根：采集累积库、正文缓存、各阶段运行目录、评估；
+#   - reports/db_load/ ⑦ 入库报告根：load_log/load_report.md/load_errors.csv/load_manifest.json；
+#   - techfin_common_output/ 旧产物根：只读保留，新流水线不再写入。
+DATA_ROOT = "data"
+# 向后兼容别名：旧脚本/旧命令仍可用 cfg.OUTPUT_ROOT。
+OUTPUT_ROOT = DATA_ROOT
+# ⑦ CSV → MySQL 入库报告根（相对本主题目录，独立于流水线运行目录序号）。
+LOAD_REPORT_ROOT = "reports/db_load"
+# 旧产物根：仅用于启动提示与 --input-dir 兼容，不在代码中写入。
+LEGACY_OUTPUT_ROOT = "techfin_common_output"
+# 运行目录自描述清单文件名（由 config/paths.py 写入）。
+RUN_MANIFEST = "_run.json"
 
 # 累积总库（位于输出根内），跨轮读写；每轮目录里的 *_cumulative.csv 是它的快照副本
 SEARCH_ACCUMULATOR = "tech_fin_news.csv"
@@ -795,6 +813,9 @@ OFFICIAL_ACCUMULATOR = "techfin_official.csv"
 # 数据与出处链接在【运行目录】里：<日期-次数>/search_delta.csv 与 search_links.txt。
 # 注：数据是"边采边增量落盘"的（不是跑完才写），且台账只在数据落盘后才记。
 SEARCH_PROGRESS = "tech_fin_search_progress.csv"
+# 官方源分页进度台账（列：source, page_url, status, n_items, ts）。
+# 与搜索台账分开：官方源按"源+页 URL"记录，重跑跳过已成功页。
+OFFICIAL_PROGRESS = "official_progress.csv"
 
 # 每轮产物的文件名前缀：两个采集脚本共用同一个输出根与当日序号，
 # 靠前缀区分是谁产出的（目录里可能同时出现 search_* 与 official_*）

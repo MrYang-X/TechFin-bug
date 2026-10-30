@@ -43,9 +43,8 @@ sys.path.insert(0, str(_TOPIC_DIR / "config"))  # → topic_config / extract_con
 # （配置目录已由上面的主题目录引导加入 sys.path）
 
 import topic_config as cfg      # noqa: E402
+from paths import finish_run_manifest, new_pipeline_run, pipeline_root  # noqa: E402
 from crawler_common import (    # noqa: E402
-    resolve_output_root,
-    resolve_run_dir,
     run_logging,
 )
 
@@ -117,6 +116,19 @@ def build_report(df, out_root, sample_n=20):
         lines.append("\n> 未发现任何数据点。请先运行 techfin_fetch_body.py 与 techfin_extract_points.py。\n")
         return "\n".join(lines)
 
+    cov_path = Path(out_root) / "coverage_latest.json"
+    if cov_path.exists():
+        try:
+            cov = json.loads(cov_path.read_text(encoding="utf-8"))
+            lines.append("## 0. 采集覆盖率（区分“没采到”与“确实没有”）\n")
+            lines.append(f"- 最近一轮：{cov.get('generated_at', '')}")
+            lines.append(f"- 检索计划总数：{cov.get('total_plans', '')}")
+            lines.append(f"- 逐检索式状态：{cov.get('status_counts', {})}")
+            lines.append(f"- 按源：{cov.get('by_source', {})}")
+            lines.append("- **未执行/失败/tripped 导致的空值不等于该地区没有数据。**\n")
+        except Exception as e:
+            lines.append(f"> 覆盖率文件读取失败：{e}\n")
+
     lines.append("## 1. 概览\n")
     lines.append(f"- 数据点总数：{len(df)}")
     lines.append(f"- 覆盖文章数：{df['article_id'].nunique()}")
@@ -129,6 +141,15 @@ def build_report(df, out_root, sample_n=20):
     lines.append(f"- 抽取方式 extract_method：{_dist(df['extract_method'])}")
     lines.append(f"- 权威性 authority：{_dist(df['authority'])}")
     lines.append(f"- 地区级别 region_level：{_dist(df['region_level'])}")
+    for col in ("region_from", "aggregation_type"):
+        if col in df.columns:
+            lines.append(f"- {col}：{_dist(df[col])}")
+    if "aggregation_type" in df.columns:
+        n_break = int((df["aggregation_type"] == "breakdown").sum())
+        lines.append(f"- 拆分口径 breakdown：{n_break}（保留证据，不参与主值）")
+    if "level3_code" in df.columns and "metric" in df.columns:
+        bad = df[(df["level3_code"] == "A103") & (df["metric"] == "count")]
+        lines.append(f"- A103+count 错配：{len(bad)}（应为 0）")
     lines.append("")
 
     lines.append("## 2b. 数据年份\n")
@@ -137,6 +158,9 @@ def build_report(df, out_root, sample_n=20):
         lines.append(f"- stat_year 非空：{int(filled.sum())}/{len(df)}（{filled.mean() * 100:.0f}%）")
         if "stat_year_src" in df.columns:
             lines.append(f"- 年份来源 stat_year_src：{_dist(df['stat_year_src'])}")
+        if "year_confidence" in df.columns:
+            yc = pd.to_numeric(df["year_confidence"], errors="coerce").fillna(0)
+            lines.append(f"- year_confidence<0.5（不参与主值）：{int((yc < 0.5).sum())}/{len(df)}")
     lines.append("")
 
     lines.append("## 3. 置信度分布\n")
@@ -152,6 +176,11 @@ def build_report(df, out_root, sample_n=20):
     got, total_units = _county_coverage(df)
     lines.append(f"- 有数据点的县级单元：{got}/{total_units}"
                  f"（县级新闻语料天然稀疏，需结合①覆盖率一起看）")
+    if "region_from" in df.columns:
+        n_query = int((df["region_from"] == "query").sum())
+        lines.append(f"- region_from=query（无文本证据，loader 默认拒绝）：{n_query}")
+        n_scope = int(df["region_from"].astype(str).str.startswith("scope_").sum())
+        lines.append(f"- region_from=scope_*（全市/全省/全国口径）：{n_scope}")
     try:
         body_total, no_body, scanned = _gap_stats(out_root)
         lines.append(f"- 正文缓存文章 {body_total} 篇，其中无正文 {no_body} 篇")
@@ -188,7 +217,7 @@ def build_report(df, out_root, sample_n=20):
 def parse_args(argv=None):
     ap = argparse.ArgumentParser(
         description=f"{cfg.TOPIC_LABEL} · ③验 数据点质量报告")
-    ap.add_argument("--output-dir", help="输出根目录（覆盖 topic_config.OUTPUT_ROOT）")
+    ap.add_argument("--output-dir", help="数据根目录（覆盖 topic_config.DATA_ROOT）")
     ap.add_argument("--points", help="指定数据点 CSV（默认用累积总库）")
     ap.add_argument("--sample", type=int, default=20, help="抽检样本条数（默认 20）")
     return ap.parse_args(argv)
@@ -197,18 +226,23 @@ def parse_args(argv=None):
 def main(argv=None):
     args = parse_args(argv)
     topic_dir = _TOPIC_DIR
-    out_root = resolve_output_root(topic_dir, cfg.OUTPUT_ROOT, args.output_dir)
+    out_root = pipeline_root(topic_dir, args.output_dir)
 
     df, path = _read_points(out_root, args.points)
-    run_dir = resolve_run_dir(out_root)
+    run_dir = new_pipeline_run("verify-points", override=args.output_dir, topic_dir=topic_dir)
     report_path = os.path.join(run_dir, "points_validation.md")
-    with run_logging(os.path.join(run_dir, cfg.POINTS_PREFIX + "verify_log")):
-        print(f"[输入] 数据点文件：{path}（{len(df)} 条）")
-        report = build_report(df, out_root, sample_n=args.sample)
-        with open(report_path, "w", encoding="utf-8") as f:
-            f.write(report)
-        print(f"[输出] 质量报告 → {report_path}")
-    print(f"[归档] 本轮产物目录：{run_dir}")
+    status = "failed"
+    try:
+        with run_logging(os.path.join(run_dir, cfg.POINTS_PREFIX + "verify_log")):
+            print(f"[输入] 数据点文件：{path}（{len(df)} 条）")
+            report = build_report(df, out_root, sample_n=args.sample)
+            with open(report_path, "w", encoding="utf-8") as f:
+                f.write(report)
+            print(f"[输出] 质量报告 → {report_path}")
+        status = "ok"
+    finally:
+        finish_run_manifest(run_dir, status=status, outputs=[report_path])
+        print(f"[归档] 本轮产物目录：{run_dir}")
 
 
 if __name__ == "__main__":

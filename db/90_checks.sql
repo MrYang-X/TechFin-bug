@@ -132,6 +132,59 @@ GROUP BY i.level3_code, i.level3_name
 ORDER BY 覆盖地区数, i.level3_code;
 
 -- ----------------------------------------------------------------------------
+-- 4.1 准确度专项（CSV 抽取/入库质量）
+-- ----------------------------------------------------------------------------
+-- A103 应为 share/%；出现 count/家 即为系统性错标，应为 0
+SELECT 'A103+count 错配（应为 0）' AS 检查项, COUNT(*) AS 结果
+FROM fact_index_value
+WHERE level3_code = 'A103' AND measure_code = 'count';
+
+-- 区县事实缺证据（不应出现）
+SELECT '区县事实缺 evidence_ref' AS 检查项, COUNT(*) AS 结果
+FROM fact_index_value v
+JOIN dim_region r ON r.region_code = v.region_code AND r.region_level = 3
+WHERE v.obs_status = 'present'
+  AND (v.evidence_ref IS NULL OR v.evidence_ref = '');
+
+-- 低置信年份（year_confidence < 0.5；loader 默认已拒绝，正常应为 0）
+SELECT '低置信年份行（应为 0）' AS 检查项, COUNT(*) AS 结果
+FROM fact_index_value
+WHERE obs_status = 'present'
+  AND remark LIKE '%year_confidence=%'
+  AND CAST(SUBSTRING_INDEX(SUBSTRING_INDEX(remark, 'year_confidence=', -1), ';', 1)
+           AS DECIMAL(5,2)) < 0.5;
+
+-- 拆分/汇总口径混入事实表（应为 0）
+SELECT 'breakdown/subset 混入' AS 检查项, COUNT(*) AS 结果
+FROM fact_index_value
+WHERE remark LIKE '%aggregation_type=breakdown%'
+   OR remark LIKE '%aggregation_type=subset%';
+
+-- 地区来源分布：query/scope_* 越多，人工复核优先级越高
+SELECT CASE
+         WHEN remark LIKE '%region_from=query%' THEN 'query'
+         WHEN remark LIKE '%region_from=scope_%' THEN 'scope_*'
+         ELSE 'text/other'
+       END AS 地区来源,
+       COUNT(*) AS 行数
+FROM fact_index_value
+GROUP BY 地区来源
+ORDER BY 行数 DESC;
+
+-- 每个县的覆盖度与最近更新时间
+SELECT r.region_code, r.region_name,
+       COUNT(v.id) AS 观测数,
+       MAX(v.updated_at) AS 最近更新
+FROM dim_region r
+LEFT JOIN fact_index_value v
+  ON v.region_code = r.region_code
+ AND v.context_type = 'actual'
+ AND v.obs_status = 'present'
+WHERE r.province_code = '440000' AND r.region_level = 3
+GROUP BY r.region_code, r.region_name
+ORDER BY 观测数, r.region_code;
+
+-- ----------------------------------------------------------------------------
 -- 5. 视图抽查
 -- ----------------------------------------------------------------------------
 -- 宽表视图：列名含义见 v_wide_column_map

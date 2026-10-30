@@ -51,14 +51,16 @@ sys.path.insert(0, str(_TOPIC_DIR / "config"))  # → topic_config / extract_con
 # （配置目录已由上面的主题目录引导加入 sys.path）
 
 import topic_config as cfg  # noqa: E402
+import region_rules as rr   # noqa: E402
+from paths import finish_run_manifest, new_pipeline_run, pipeline_root  # noqa: E402
 from crawler_common import (  # noqa: E402
     clean_text,
+    hamming64,
     is_noise_source,
     looks_like_url_title,
     parse_date,
-    resolve_output_root,
-    resolve_run_dir,
     run_logging,
+    simhash64,
 )
 
 # ==================== 本脚本配置（不动 topic_config，便于将来照抄新主题）====================
@@ -84,12 +86,14 @@ CURATED_COLS = [
     "url", "url_canonical", "url_dedup_key",
     "date", "date_raw", "date_url", "date_final", "date_source",
     "level1_code", "level1_name", "level2_code", "level2_name",
-    "level3_code", "level3_name", "unit", "indicators",
+    "level3_code", "level3_name", "unit", "indicators", "indicator_codes_all",
     "region_code", "region_name", "city_name", "region_level", "region_from",
+    "region_confidence", "region_evidence",
     "rel_score", "rel_level", "rel_evidence", "n_number_statements", "is_relevant",
     "quality_grade", "grade_reason",
     "has_body", "body_chars", "body_method", "body_term_hits",
     "event_group_id", "n_sources_in_event",
+    "near_dup_of", "near_dup_score", "is_near_dup",
     "crawl_time", "curate_time", "curator_version",
 ]
 UNCERTAIN_COLS = ["article_id", "kind", "title", "source", "url", "date", "reason"]
@@ -163,54 +167,14 @@ def url_dedup_key(url):
 
 # ==================== 地区索引（不 import ③，自带一份）====================
 
-LEVEL_RANK = {"province": 1, "city": 2, "county": 3}
-AMBIGUOUS_REGION_NAMES = {"城区"}
-
-
 def build_region_index():
-    """{别名: (区划码, 显示名, 级别, 所属市)}，含去后缀简称与 REGION_QUERY_NAME_OVERRIDES。"""
-    idx = {}
-
-    def add(alias, code, name, level, city):
-        alias = (alias or "").strip()
-        if not alias or alias in AMBIGUOUS_REGION_NAMES:
-            return
-        idx.setdefault(alias, (code, name, level, city))
-
-    add("广东省", "440000", "广东省", "province", "")
-    for city, units in cfg.GUANGDONG_REGIONS.items():
-        city_code = units[0][0][:4] + "00"
-        add(city, city_code, city, "city", city)
-        if len(city) >= 3:
-            add(city[:-1], city_code, city, "city", city)
-        for code, name in units:
-            add(name, code, name, "county", city)
-            if len(name) >= 3:
-                add(name[:-1], code, name, "county", city)
-    for code, qname in cfg.REGION_QUERY_NAME_OVERRIDES.items():
-        add(qname, code, qname, "county", "")
-    return idx
+    """兼容旧调用：地区索引统一由 config/region_rules.py 构建。"""
+    return rr.build_region_index()
 
 
 def resolve_region(title, summary, body, row, idx):
-    """文本→(码,名,级别,市,来源)；取最深命中；无文本命中则回退采集时的 region_code。"""
-    text = " ".join(x for x in (title, summary, body) if x)
-    if text:
-        hits = []
-        for alias, val in idx.items():
-            pos = text.find(alias)
-            if pos >= 0:
-                hits.append((LEVEL_RANK.get(val[2], 0), len(alias), pos, val))
-        if hits:
-            hits.sort(key=lambda h: (-h[0], -h[1], h[2]))
-            v = hits[0][3]
-            return v[0], v[1], v[2], v[3], "text"
-    code = str(row.get("region_code", "") or "").strip()
-    name = str(row.get("region_name", "") or "").strip()
-    if code:
-        level = "province" if code.endswith("0000") else ("city" if code.endswith("00") else "county")
-        return code, name, level, "", "meta"
-    return "", "", "unknown", "", "none"
+    """兼容旧调用：标题 > 摘要 > 正文前 500 字，统一由 region_rules 实现。"""
+    return rr.resolve_article_region(title, summary, body, row, idx)
 
 
 # ==================== 指标词族与命中 ====================
@@ -312,6 +276,7 @@ def score_relevance(row, body_text, fams, idx):
     body_text = body_text or ""
     score, codes, evidence = 0, [], []
     levels = []
+    code_levels: dict[str, set[str]] = {}
 
     def hit(text, pts, level):
         nonlocal score
@@ -322,6 +287,7 @@ def score_relevance(row, body_text, fams, idx):
             for c, t in h:
                 if c not in codes:
                     codes.append(c)
+                code_levels.setdefault(c, set()).add(level)
                 if len(evidence) < 3:
                     evidence.append(t)
         return bool(h)
@@ -333,7 +299,7 @@ def score_relevance(row, body_text, fams, idx):
     if any(a in joined for a in cfg.ANCHOR_TERMS):
         score += 1
     region = resolve_region(title, summary, body_text, row, idx)
-    if region[4] == "text":
+    if region.code and region.source not in ("aggregate", "query", "none"):
         score += 1
 
     rel_level = "title" if t_hit else ("body" if b_hit else ("summary" if s_hit else "none"))
@@ -341,6 +307,7 @@ def score_relevance(row, body_text, fams, idx):
         "rel_score": score,
         "rel_level": rel_level,
         "level3_codes": codes,
+        "level3_code_levels": {c: sorted(v) for c, v in code_levels.items()},
         "rel_evidence": "、".join(evidence),
         "region": region,
         "n_number_statements": count_number_statements(body_text or joined, fams),
@@ -501,6 +468,7 @@ def _enrich(row, body_obj, fams, idx):
         "date_final": date_final, "date_source": date_source,
         "region_code": region[0], "region_name": region[1],
         "region_level": region[2], "city_name": region[3], "region_from": region[4],
+        "region_confidence": region[5], "region_evidence": region[6],
         "rel_score": rel["rel_score"], "rel_level": rel["rel_level"],
         "rel_evidence": rel["rel_evidence"],
         "n_number_statements": rel["n_number_statements"],
@@ -511,15 +479,27 @@ def _enrich(row, body_obj, fams, idx):
         "body_method": (body_obj.get("body_method", "") if body_obj else ""),
         "body_term_hits": rel["body_term_hits"],
         "event_group_id": "", "n_sources_in_event": 1,
+        "near_dup_of": "", "near_dup_score": "", "is_near_dup": 0,
         "curate_time": now_str(), "curator_version": CURATOR_VERSION,
     })
-    # 指标列：官方语料原本没有，用词族命中回填；检索语料保留原值
+    # 近重复内部指纹（不写入 CSV）：只取前 2000 字，避免长正文拖慢清洗
+    out["_simhash"] = simhash64((body_text or (title + " " + summary_clean))[:2000])
+    # 指标列：官方语料原本没有，用词族命中回填；检索语料保留原值。
+    # 多词族命中时不再盲取 codes[0]，而是按"标题命中 > 摘要命中 > 正文命中"选主指标，
+    # 并把全部命中保留在 indicator_codes_all 供复核。
     out["indicators"] = row.get("indicators", "") or ""
+    out["indicator_codes_all"] = ";".join(codes)
     if codes and not str(out.get("level3_code", "")).strip():
-        fam = fams[codes[0]]
+        def _rank(code):
+            hit_levels = set(rel["level3_code_levels"].get(code, []))
+            priority = 3 if "title" in hit_levels else (
+                2 if "summary" in hit_levels else (1 if "body" in hit_levels else 0))
+            return priority, -codes.index(code)
+        primary = max(codes, key=_rank)
+        fam = fams[primary]
         out.update({"level1_code": fam["level1_code"], "level1_name": fam["level1_name"],
                     "level2_code": fam["level2_code"], "level2_name": fam["level2_name"],
-                    "level3_code": codes[0], "level3_name": fam["level3_name"],
+                    "level3_code": primary, "level3_name": fam["level3_name"],
                     "unit": fam["unit"]})
     if codes and not out["indicators"]:
         out["indicators"] = "+".join(f"{fams[c]['level2_code']}:{fams[c]['level3_name']}"
@@ -578,6 +558,35 @@ def _drop_entry(row, reason, dup_of=""):
             "drop_reason": reason, "dup_of": dup_of}
 
 
+def annotate_near_dups(rows, threshold=3):
+    """
+    近重复标注：同 (region_code, level3_code) 桶内 SimHash 汉明距离 ≤ threshold 的
+    后来者标 `is_near_dup=1` / `near_dup_of` / `near_dup_score`。
+    **只标注、不删除**——多源转载是研究特性，是否折叠由下游决定。
+    """
+    groups = defaultdict(list)
+    for r in rows:
+        groups[(r.get("region_code", ""), r.get("level3_code", ""))].append(r)
+    for group in groups.values():
+        if len(group) < 2:
+            continue
+        for i, anchor in enumerate(group):
+            if anchor.get("is_near_dup"):
+                continue
+            ha = anchor.get("_simhash", 0)
+            if not ha:
+                continue
+            for other in group[i + 1:]:
+                hb = other.get("_simhash", 0)
+                if not hb:
+                    continue
+                dist = hamming64(ha, hb)
+                if dist <= threshold:
+                    other["is_near_dup"] = 1
+                    other["near_dup_of"] = anchor.get("curated_id", "")
+                    other["near_dup_score"] = round(1 - dist / 64, 3)
+
+
 def curate_rows(df, body_index, fams, idx):
     rows, dropped = [], []
     funnel = Counter({"input": len(df)})
@@ -617,7 +626,8 @@ def curate_rows(df, body_index, fams, idx):
             dropped.append(_drop_entry(r, "irrelevant"))
             funnel["irrelevant"] += 1
 
-    # ⑦ 事件分组（只标注）
+    # ⑦ 事件分组（只标注）+ 近重复标注（只标注、不删除）
+    annotate_near_dups(final)
     group_events(final)
     return final, dropped, uncertain, funnel
 
@@ -639,6 +649,8 @@ def build_report(funnel, final, dropped, uncertain, body_index, sample_n=20):
     L.append(f"- 保留的 kind 分布：{dict(kinds)}")
     L.append(f"- 保留的 quality_grade 分布：{dict(Counter(r['quality_grade'] for r in final))}")
     L.append(f"- 保留的 rel_level 分布：{dict(Counter(r['rel_level'] for r in final))}")
+    L.append(f"- 近重复标注（SimHash≤3，只标注不删除）："
+             f"{sum(1 for r in final if r.get('is_near_dup'))}")
     regions = Counter(r["region_code"] for r in final if r["region_code"])
     L.append(f"- 覆盖地区数：{len(regions)}（县级单元）\n")
 
@@ -694,7 +706,7 @@ def artifact_paths(run_dir):
 def parse_args(argv=None):
     ap = argparse.ArgumentParser(
         description=f"{cfg.TOPIC_LABEL} · ④ 语料清洗/提纯")
-    ap.add_argument("--output-dir", help="输出根目录（覆盖 topic_config.OUTPUT_ROOT）")
+    ap.add_argument("--output-dir", help="数据根目录（覆盖 topic_config.DATA_ROOT）")
     ap.add_argument("--sample", type=int, default=20, help="报告抽检样本数（默认 20）")
     return ap.parse_args(argv)
 
@@ -731,6 +743,8 @@ def run_once(run_dir, paths, out_root, sample_n):
     print(f"[漏斗] 输入 {funnel['input']} → 噪声 {funnel['noise']}，空标题 {funnel['empty']}，"
           f"重复 {funnel['dup']}，不相关 {funnel['irrelevant']}，待确认 {funnel['uncertain']}")
     print(f"[保留] 干净语料 {len(final)} 条 → {out_root / cfg.CURATED_ACCUMULATOR}")
+    print(f"[近重复] 标注 {sum(1 for r in final if r.get('is_near_dup'))} 条"
+          f"（只标注，不删除多源转载）")
     print(f"[队列] 待确认 {len(uncertain)} 条 → {out_root / cfg.CURATED_UNCERTAIN}")
     print(f"[报告] {paths['report']}")
     print("-" * 60)
@@ -739,14 +753,17 @@ def run_once(run_dir, paths, out_root, sample_n):
 def main(argv=None):
     args = parse_args(argv)
     topic_dir = _TOPIC_DIR
-    out_root = resolve_output_root(topic_dir, cfg.OUTPUT_ROOT, args.output_dir)
-    run_dir = resolve_run_dir(out_root)
+    out_root = pipeline_root(topic_dir, args.output_dir)
+    run_dir = new_pipeline_run("clean", override=args.output_dir, topic_dir=topic_dir)
     paths = artifact_paths(run_dir)
+    status = "failed"
     try:
         with run_logging(paths["log"]):
-            print(f"输出根目录：{out_root}")
+            print(f"数据根目录：{out_root}")
             run_once(run_dir, paths, out_root, args.sample)
+        status = "ok"
     finally:
+        finish_run_manifest(run_dir, status=status)
         print(f"[归档] 本轮产物目录：{run_dir}")
 
 

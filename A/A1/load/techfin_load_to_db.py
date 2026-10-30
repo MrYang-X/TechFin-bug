@@ -1,18 +1,21 @@
 """
 科技金融指数研究 · ⑦ CSV → MySQL 数据迁移/入库（可选后处理）
 
-职责：读取 `techfin_common_output` 中的聚合级数据（默认最新一轮
+职责：读取流水线数据根 `A/A1/data/` 中的聚合级数据（默认最新一轮
 `*/points_resolved.csv`），用证据级 `techfin_a101_points.csv` / `points_delta.csv`
 补齐单位、语境、发布日期与证据片段，经严格校验后写入 MySQL 的
-`fact_index_value` 表。
+`fact_index_value` 表。入库报告默认写到独立的 `A/A1/reports/db_load/<YYYY.M.D-N>/`，
+不与爬虫运行目录混放。
 
 设计原则：
   - 系统记录只写 `fact_index_value`，不新增文章/证据表；article_id 存 `evidence_ref`。
   - 默认严格过滤：只入 actual + 有值 + 指标/单位匹配 + 非假阳性 + 地区一致的行。
-  - A103 默认阻断（当前 23/23 个证据点都是 A101 高企数量错标为 A103）。
+  - 地区/年份/拆分口径/指标状态均有门禁，详见 `--help` 与 README。
+  - A103 默认阻断（抽取层已强制规则层只产 A101，loader 作最后一道闸门）。
   - 单位存实际观测单位，不做跨单位换算；value_text 保留原文。
-  - 幂等：以 `(region_code, year, level3_code, measure_code, context_type)` 为键 upsert。
-  - 所有可疑行写入 `load_errors.csv`，不静默丢弃。
+  - 幂等：以 `(region_code, year, level3_code, measure_code, context_type)` 为键 upsert；
+    `--skip-imported` 再按文件 SHA-256 做文件级幂等。
+  - 所有可疑行写入 `load_errors.csv`，不静默丢弃；默认 transaction 模式整体回滚。
 
 用法（在仓库根或 A/A1 下均可）：
   # 预演，不写库
@@ -27,7 +30,7 @@
 
   # 指定输入文件 / 合并所有轮次
   python A/A1/load/techfin_load_to_db.py \
-      --input-file techfin_common_output/2026.10.19-6/points_resolved.csv
+      --input-file data/2026.10.19-6/points_resolved.csv
   python A/A1/load/techfin_load_to_db.py --all-runs
 
   # 放行“补充公布/更名/搬迁”等批次值（当前数据可写入 1 行）
@@ -45,6 +48,7 @@ from __future__ import annotations
 import argparse
 import getpass
 import hashlib
+import json
 import os
 import re
 import sys
@@ -72,11 +76,17 @@ sys.path.insert(0, str(_REPO_ROOT))
 sys.path.insert(0, str(_TOPIC_DIR / "config"))
 
 import topic_config as cfg  # noqa: E402
+from paths import (  # noqa: E402
+    file_fingerprint,
+    finish_run_manifest,
+    new_load_run,
+    pipeline_root,
+    write_json_atomic,
+    write_run_manifest,
+)
 from crawler_common import (  # noqa: E402
     RUN_DIR_RE,
     parse_date,
-    resolve_output_root,
-    resolve_run_dir,
     run_logging,
 )
 
@@ -113,7 +123,7 @@ ERROR_COLS = [
     "row_no", "input_file", "run_dir", "region_code", "region_name",
     "level3_code", "metric", "stat_year", "stat_year_src", "canonical_value",
     "context_type", "action", "severity", "error_code", "error_codes_all",
-    "error_detail", "evidence_ref", "evidence_snippet", "suggestion",
+    "error_detail", "evidence_ref", "evidence_snippet", "suggestion", "row_json",
 ]
 
 # 数值与单位解析
@@ -242,6 +252,7 @@ class Issue:
     evidence_ref: str = ""
     evidence_snippet: str = ""
     suggestion: str = ""
+    row_json: str = ""
     codes_all: list[str] = field(default_factory=list)
 
 
@@ -257,6 +268,7 @@ class LoadStats:
     warnings: int = 0
     db_errors: int = 0
     hard_rejects: int = 0
+    truncated_fields: dict[str, int] = field(default_factory=dict)
 
 
 @dataclass
@@ -296,6 +308,18 @@ class WriteStats:
 
 
 # ==================== 通用小工具 ====================
+
+def _clip(text: Any, limit: int, field_name: str, ctx: dict[str, Any] | None = None) -> str:
+    """按数据库字段长度截断；被截断时计入 LoadStats.truncated_fields。"""
+    value = str(text or "")
+    if len(value) <= limit:
+        return value
+    if ctx is not None:
+        stats = ctx.get("load_stats")
+        if stats is not None:
+            stats.truncated_fields[field_name] = stats.truncated_fields.get(field_name, 0) + 1
+    return value[:limit]
+
 
 def s(row: Any, key: str, default: str = "") -> str:
     """从 pandas Series / dict 取字符串，NaN/None → 空串。"""
@@ -856,7 +880,7 @@ def load_dimensions(conn) -> Dims | None:
     )
 
 
-def load_existing(conn) -> dict[tuple[str, int, str, str, str], dict[str, Any]]:
+def load_existing(conn) -> dict[tuple[str, int, str, str, str], dict[str, Any]] | None:
     sql = """
         SELECT region_code, year, level3_code, measure_code, context_type,
                obs_status, data_quality
@@ -875,11 +899,64 @@ def load_existing(conn) -> dict[tuple[str, int, str, str, str], dict[str, Any]]:
                 out[key] = dict(row)
     except Exception as exc:
         print(f"[错误] 读取 fact_index_value 失败：{type(exc).__name__}: {exc}")
-        return {}
+        # 不能把"读取失败"当成"表为空"——否则会按全新数据覆盖，风险极高
+        return None
     return out
 
 
-# ==================== 证据匹配 ====================
+def existing_batch_hashes(conn) -> set[str]:
+    """已成功导入的文件 SHA-256 集合（用于 --skip-imported）。"""
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT file_sha256 FROM import_batch "
+                "WHERE file_sha256 IS NOT NULL AND file_sha256 <> ''"
+            )
+            return {str(r["file_sha256"]) for r in cur.fetchall()}
+    except Exception as exc:
+        print(f"[警告] 读取 import_batch 失败（--skip-imported 不生效）：{exc}")
+        return set()
+
+
+def record_import_batch(
+    conn,
+    inputs: list[InputFile],
+    stats: LoadStats,
+    write_stats: WriteStats,
+    args: argparse.Namespace,
+) -> None:
+    """成功写库后登记 import_batch（dry-run 或 DB 错误时不登记）。"""
+    if args.dry_run or write_stats.db_errors:
+        return
+    try:
+        sha = (inputs[0].sha256 if len(inputs) == 1 else
+               hashlib.sha256("".join(sorted(i.sha256 for i in inputs)).encode()).hexdigest())
+        names = ",".join(i.path.name for i in inputs)[:255]
+        note = (
+            f"loader={LOADER_VERSION}; input={stats.input_rows}; passed={stats.passed}; "
+            f"inserted={write_stats.inserted}; updated={write_stats.updated}; "
+            f"rejected={stats.rejected}; skipped={stats.skipped}; "
+            f"write_mode={args.write_mode}"
+        )[:500]
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO import_batch "
+                "(batch_name, file_name, file_sha256, default_source_channel, "
+                " default_source_authority, default_source_ref, note) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s)",
+                (f"loader {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", names,
+                 sha, "news_corpus", "unknown", "", note),
+            )
+        conn.commit()
+        print(f"[批次] 已登记 import_batch（sha256={sha[:12]}…）")
+    except Exception as exc:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        print(f"[警告] 写 import_batch 失败（不影响入库）：{exc}")
+
+
 
 def point_score(point: dict[str, Any], context: str, first_article: str) -> int:
     score = 0
@@ -979,6 +1056,10 @@ def make_issue(
         evidence_ref=s(row, "source_article_ids"),
         evidence_snippet=s(point, "evidence_snippet") if point else "",
         suggestion=suggestion,
+        row_json=json.dumps(
+            {str(k): v for k, v in dict(row).items()},
+            ensure_ascii=False, default=str,
+        )[:2000],
         codes_all=[code],
     )
 
@@ -995,6 +1076,9 @@ def build_remark(
 ) -> str:
     parts = [
         f"stat_year_src={s(row, 'stat_year_src')}",
+        f"year_confidence={s(row, 'year_confidence')}",
+        f"region_from={s(row, 'region_from')}",
+        f"aggregation_type={s(row, 'aggregation_type')}",
         f"point_id={s(point, 'point_id') if point else ''}",
         f"measure={measure['measure_code']}",
         f"unit={actual_unit}",
@@ -1024,6 +1108,8 @@ def map_channel(curated: dict[str, Any], point: dict[str, Any], row: Any) -> str
         return "bulletin"
     if authority == "媒体":
         return "news_corpus"
+    if authority in ("专家", "expert"):
+        return "expert"
     if authority == "第三方":
         return "third_party"
     return "news_corpus"
@@ -1041,6 +1127,7 @@ def build_present_record(
     dims: Dims,
     assumed_unit: bool,
     partial_batch: bool,
+    ctx: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     authority = s(row, "authority") or s(point, "authority")
     source_authority = AUTHORITY_MAP.get(authority, "unknown")
@@ -1056,7 +1143,8 @@ def build_present_record(
     evidence_ref = ",".join(ordered_ids)
 
     value_text = s(point, "value_text") or f"{format_number(parsed.num)}{actual_unit}"
-    source_ref = (s(curated, "title") or s(row, "data_source") or source_channel)[:200]
+    source_ref = _clip(s(curated, "title") or s(row, "data_source") or source_channel,
+                       200, "source_ref", ctx)
     publish_date = safe_date(s(point, "publish_date")) or safe_date(s(curated, "date_final"))
     n_sources = parse_int(s(row, "n_sources"))
     if n_sources is None:
@@ -1080,7 +1168,7 @@ def build_present_record(
         "source_ref": source_ref,
         "obs_status": "present",
         "value_num": decimal_or_none(parsed.num),
-        "value_text": value_text[:255],
+        "value_text": _clip(value_text, 255, "value_text", ctx),
         "value_unit": actual_unit,
         "data_quality": quality,
         "n_sources": n_sources,
@@ -1089,11 +1177,11 @@ def build_present_record(
         "agreement": to_bool_int(s(row, "agreement")),
         "evidence_ref": evidence_ref,
         "source_publish_date": publish_date,
-        "chosen_reason": s(row, "chosen_reason")[:255],
-        "remark": build_remark(
+        "chosen_reason": _clip(s(row, "chosen_reason"), 255, "chosen_reason", ctx),
+        "remark": _clip(build_remark(
             row, point, measure, actual_unit, verified,
             assumed_unit, parsed.approx, partial_batch,
-        ),
+        ), 500, "remark", ctx),
     }
 
 
@@ -1101,6 +1189,7 @@ def build_missing_record(
     row: Any,
     measure: dict[str, Any],
     context: str,
+    ctx: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     ids = split_ids(s(row, "source_article_ids"))
     return {
@@ -1123,11 +1212,11 @@ def build_missing_record(
         "agreement": to_bool_int(s(row, "agreement")),
         "evidence_ref": ",".join(ids),
         "source_publish_date": None,
-        "chosen_reason": s(row, "chosen_reason")[:255],
-        "remark": (
+        "chosen_reason": _clip(s(row, "chosen_reason"), 255, "chosen_reason", ctx),
+        "remark": _clip(
             f"resolved 无实际口径; stat_year_src={s(row, 'stat_year_src')}; "
-            f"agreement={s(row, 'agreement')}; n_support={s(row, 'n_support')}"
-        )[:500],
+            f"agreement={s(row, 'agreement')}; n_support={s(row, 'n_support')}",
+            500, "remark", ctx),
     }
 
 
@@ -1163,13 +1252,29 @@ def evaluate_row(row: Any, ctx: dict[str, Any]) -> tuple[dict[str, Any] | None, 
         issues.append(make_issue(ctx, "reject", "hard", "REGION_INACTIVE", f"region_code={region_code} 已失效"))
         return None, issues
 
-    # 3) 指标阻断
+    # 3) 指标阻断 + 维度状态
     if level3 in args.block_level3:
         issues.append(make_issue(
             ctx, "reject", "policy", "LEVEL3_BLOCKED",
             f"{level3} 被 --block-level3 阻断（当前 A103 存在系统性 count/家 错配）",
             "如确认数据合法，使用 --allow-level3 A103 显式放开。",
         ))
+        return None, issues
+    index_info = dims.indexes.get(level3) or {}
+    index_status = str(index_info.get("status", "") or "")
+    if index_status and index_status != "active" and not args.allow_inactive_index:
+        issues.append(make_issue(
+            ctx, "reject", "policy", "INDEX_INACTIVE",
+            f"{level3} 的 dim_index.status={index_status}，不是 active",
+            "如确认仍要写入，使用 --allow-inactive-index。",
+        ))
+        return None, issues
+
+    # 3.5) 年份先校验：放在空值分支之前，避免 --include-missing 对空年份 int("") 崩溃
+    year_value = parse_int(stat_year)
+    if year_value is None or not (1990 <= year_value <= 2100):
+        issues.append(make_issue(
+            ctx, "reject", "hard", "YEAR_INVALID", f"stat_year={stat_year!r}"))
         return None, issues
 
     # 4) 口径
@@ -1196,25 +1301,25 @@ def evaluate_row(row: Any, ctx: dict[str, Any]) -> tuple[dict[str, Any] | None, 
         ))
         return None, issues
 
-    # 5) 空值
+    # 5) 语境：先于空值判断，避免 --include-missing 绕过 --include-non-actual
+    if context != "actual" and not args.include_non_actual:
+        issues.append(make_issue(
+            ctx, "skip", "policy", "NON_ACTUAL_CONTEXT",
+            f"context_type={context}；默认只入 actual",
+            "如需入库，使用 --include-non-actual。",
+        ))
+        return None, issues
+
+    # 6) 空值
     if not canonical:
         if args.include_missing:
-            record = build_missing_record(row, measure, context)
+            record = build_missing_record(row, measure, context, ctx=ctx)
             issues.append(make_issue(ctx, "warn", "soft", "EMPTY_VALUE_MISSING", "主值为空，按 --include-missing 写入 missing"))
             return record, issues
         issues.append(make_issue(
             ctx, "skip", "policy", "EMPTY_VALUE",
             f"canonical_value 为空；n_sources={s(row, 'n_sources')}，agreement={s(row, 'agreement')}",
             "空值不能写 0；确认有实际值后重跑，或用 --include-missing 写入缺失占位。",
-        ))
-        return None, issues
-
-    # 6) 语境
-    if context != "actual" and not args.include_non_actual:
-        issues.append(make_issue(
-            ctx, "skip", "policy", "NON_ACTUAL_CONTEXT",
-            f"context_type={context}；默认只入 actual",
-            "如需入库，使用 --include-non-actual。",
         ))
         return None, issues
 
@@ -1227,6 +1332,23 @@ def evaluate_row(row: Any, ctx: dict[str, Any]) -> tuple[dict[str, Any] | None, 
             "检查 source_article_ids、level3_code、region_code、stat_year、value_num 是否与证据级一致。",
         ))
         return None, issues
+
+    # 7.1) LLM 证据可验证性：evidence_snippet 必须在正文/附件中能定位到
+    if s(point, "extract_method") == "llm" and s(point, "evidence_verified") not in (
+            "1", "True", "true"):
+        if args.allow_unverified_evidence:
+            issues.append(make_issue(
+                ctx, "warn", "soft", "EVIDENCE_UNVERIFIED",
+                "LLM 证据片段未在正文/附件中定位到（已由 --allow-unverified-evidence 放行）",
+                "建议人工核对 evidence_snippet。", point=point,
+            ))
+        else:
+            issues.append(make_issue(
+                ctx, "reject", "hard", "EVIDENCE_UNVERIFIED",
+                "LLM 证据片段未在正文/附件中定位到",
+                "核实证据原文；或使用 --allow-unverified-evidence 显式放行。", point=point,
+            ))
+            return None, issues
 
     # 8) 数值/单位
     parsed = parse_value(s(point, "value_text"), canonical, s(point, "unit"))
@@ -1309,6 +1431,33 @@ def evaluate_row(row: Any, ctx: dict[str, Any]) -> tuple[dict[str, Any] | None, 
         ))
     if region_issues:
         return None, issues
+
+    # 11.1) 地区置信与拆分口径：默认硬拒绝，避免"没采到/全文回退"污染事实表
+    level = int(region.get("region_level") or 0)
+    region_from = s(row, "region_from")
+    agg_type = s(row, "aggregation_type")
+    if level == 3 and region_from in ("query", "none", "scope_national"):
+        if args.allow_region_query:
+            issues.append(make_issue(
+                ctx, "warn", "soft", "REGION_UNVERIFIED",
+                f"region_from={region_from}，县级地区无文本证据（已由 --allow-region-query 放行）",
+                "建议人工核对地区归属。", point=point,
+            ))
+        else:
+            issues.append(make_issue(
+                ctx, "reject", "hard", "REGION_UNVERIFIED",
+                f"region_from={region_from}，县级地区无文本证据",
+                "确认原文明确写有该地区；或使用 --allow-region-query 显式放行。", point=point,
+            ))
+            return None, issues
+    if agg_type == "breakdown" and not args.allow_breakdown:
+        issues.append(make_issue(
+            ctx, "reject", "hard", "AGGREGATE_VALUE",
+            "aggregation_type=breakdown（分别有/各区/四区/其中），拆分值不能代表地区总量",
+            "如研究口径接受拆分值，使用 --allow-breakdown。", point=point,
+        ))
+        return None, issues
+
     verified = region_verified(window, title, region, dims)
     if verified == "metadata" and s(row, "region_from") == "query":
         issues.append(make_issue(
@@ -1340,6 +1489,21 @@ def evaluate_row(row: Any, ctx: dict[str, Any]) -> tuple[dict[str, Any] | None, 
     elif year_src == "window" and year_mark not in window:
         issues.append(make_issue(ctx, "warn", "soft", "YEAR_WINDOW_UNVERIFIED", f"stat_year_src=window，证据中无 {year_mark}", point=point))
 
+    year_conf = parse_float(s(row, "year_confidence"))
+    if year_conf is not None and year_conf < 0.5:
+        if args.allow_low_confidence_year:
+            issues.append(make_issue(
+                ctx, "warn", "soft", "YEAR_LOW_CONFIDENCE",
+                f"year_confidence={year_conf:.2f} < 0.5（已放行）", point=point,
+            ))
+        else:
+            issues.append(make_issue(
+                ctx, "reject", "policy", "YEAR_LOW_CONFIDENCE",
+                f"year_confidence={year_conf:.2f} < 0.5；统计年证据不足",
+                "核实年份，或使用 --allow-low-confidence-year。", point=point,
+            ))
+            return None, issues
+
     publish_year = parse_int(s(point, "publish_date")[:4]) if s(point, "publish_date") else None
     if publish_year and year > publish_year:
         issues.append(make_issue(
@@ -1353,7 +1517,7 @@ def evaluate_row(row: Any, ctx: dict[str, Any]) -> tuple[dict[str, Any] | None, 
     curated = ctx["curated"].get(s(point, "article_id"), {}) or ctx["curated"].get(split_ids(s(row, "source_article_ids"))[0] if split_ids(s(row, "source_article_ids")) else "", {})
     record = build_present_record(
         row, point, measure, parsed, actual_unit, context, verified,
-        curated, dims, assumed_unit, partial_batch,
+        curated, dims, assumed_unit, partial_batch, ctx=ctx,
     )
 
     # 一致性警告
@@ -1449,6 +1613,28 @@ def write_records(
         stats.updated += 1
 
     if args.dry_run:
+        return stats, issues
+
+    if args.write_mode == "transaction" and args.on_db_error == "abort":
+        total = len(present_to_write) + len(missing_to_write)
+        try:
+            with conn.cursor() as cur:
+                if present_to_write:
+                    cur.executemany(UPSERT_SQL, [record_params(r) for r in present_to_write])
+                if missing_to_write:
+                    cur.executemany(MISSING_SQL, [record_params(r) for r in missing_to_write])
+            conn.commit()
+        except Exception as exc:
+            conn.rollback()
+            stats.inserted = 0
+            stats.updated = 0
+            stats.db_errors = total
+            issues.append(Issue(
+                row_no=0, input_file="", region_code="", level3_code="", stat_year="",
+                action="reject", severity="hard", code="DB_TRANSACTION_ROLLBACK",
+                detail=f"{type(exc).__name__}: {exc}",
+                suggestion="事务已整体回滚；修复后重跑，或使用 --on-db-error isolate / --write-mode chunked。",
+            ))
         return stats, issues
 
     def execute(items: list[dict[str, Any]], sql: str) -> None:
@@ -1597,6 +1783,14 @@ def write_reports(
     lines.append(f"- 来源渠道：{dict(channel_counter)}")
     lines.append(f"- 质量等级：{dict(quality_counter)}")
     lines.append("")
+    lines.append("## 6.1 字段截断")
+    lines.append("")
+    if stats.truncated_fields:
+        for field_name, count in sorted(stats.truncated_fields.items()):
+            lines.append(f"- `{field_name}` 截断 {count} 次")
+    else:
+        lines.append("无。")
+    lines.append("")
     lines.append("## 7. 维度自检")
     lines.append("")
     if dims:
@@ -1622,22 +1816,102 @@ def write_reports(
     (report_dir / "load_report.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+def write_load_manifest(
+    report_dir: Path,
+    out_root: Path,
+    started_at: str,
+    stats: LoadStats,
+    inputs: list[InputFile],
+    dims: Dims | None,
+    args: argparse.Namespace,
+    write_stats: WriteStats,
+) -> None:
+    """写 load_manifest.json：输入指纹、参数快照、目标库与漏斗统计（不含密码）。"""
+    try:
+        payload = {
+            "schema_version": 1,
+            "loader_version": LOADER_VERSION,
+            "started_at": started_at,
+            "finished_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "data_root": str(out_root),
+            "report_dir": str(report_dir),
+            "database": {
+                "name": args.database, "host": args.host, "port": args.port,
+                "user": args.user, "dry_run": bool(args.dry_run),
+            },
+            "policy": {
+                "upsert": args.upsert_policy,
+                "write_mode": args.write_mode,
+                "on_db_error": args.on_db_error,
+                "skip_imported": bool(args.skip_imported),
+                "block_level3": sorted(args.block_level3),
+                "include_non_actual": bool(args.include_non_actual),
+                "include_missing": bool(args.include_missing),
+                "allow_partial_batch": bool(args.allow_partial_batch),
+                "allow_approx": bool(args.allow_approx),
+                "allow_low_confidence_year": bool(args.allow_low_confidence_year),
+            },
+            "inputs": [
+                {**file_fingerprint(inp.path), "run_dir": inp.run_dir,
+                 "run_order": list(inp.run_order)}
+                for inp in inputs
+            ],
+            "dimensions": {
+                "regions": len(dims.regions) if dims else 0,
+                "measures": len(dims.measures) if dims else 0,
+                "primary": len(dims.primary) if dims else 0,
+                "channels": len(dims.channels) if dims else 0,
+            },
+            "stats": asdict(stats),
+            "write_stats": asdict(write_stats),
+        }
+        write_json_atomic(Path(report_dir) / "load_manifest.json", payload)
+    except Exception as exc:
+        print(f"[警告] 写 load_manifest.json 失败（不影响入库）：{exc}")
+
+
 # ==================== 主流程 ====================
 
 def run_once(args: argparse.Namespace) -> int:
-    out_root = Path(resolve_output_root(_TOPIC_DIR, cfg.OUTPUT_ROOT, args.output_dir))
+    """包装 _run_once：无论成功/失败/异常，都更新报告目录的 _run.json。"""
+    state = {"dir": None, "status": "failed"}
+    try:
+        return _run_once(args, state)
+    finally:
+        report_dir = state.get("dir")
+        if report_dir:
+            finish_run_manifest(Path(report_dir), status=state.get("status", "failed"))
+
+
+def _run_once(args: argparse.Namespace, state: dict[str, Any]) -> int:
+    out_root = Path(pipeline_root(_TOPIC_DIR, args.output_dir))
     if args.report_dir:
         report_dir = resolve_user_path(args.report_dir)
         report_dir.mkdir(parents=True, exist_ok=True)
+        write_run_manifest(
+            report_dir, stage="load", argv=sys.argv[1:],
+            data_root=out_root, report_root=report_dir.parent,
+        )
     else:
-        report_dir = Path(resolve_run_dir(out_root))
+        report_dir = Path(new_load_run(
+            "load", override=args.report_root, topic_dir=_TOPIC_DIR, argv=sys.argv[1:]))
+    state["dir"] = report_dir
+    started_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     with run_logging(report_dir / "load_log"):
         print("=" * 60)
         print(f"{cfg.TOPIC_LABEL} · ⑦ CSV → MySQL 入库")
         print("=" * 60)
-        print(f"输出根目录：{out_root}")
+        print(f"数据根目录：{out_root}")
         print(f"报告目录：{report_dir}")
+        legacy = Path(_TOPIC_DIR) / cfg.LEGACY_OUTPUT_ROOT
+        try:
+            empty_new = not any(out_root.iterdir())
+        except OSError:
+            empty_new = True
+        if empty_new and legacy.exists():
+            print(f"[提示] 新数据根为空；旧产物保留在 {legacy}（只读）。"
+                  f"如需读取旧运行目录，使用 --input-dir。")
 
         inputs = discover_inputs(args, out_root)
         if not inputs:
@@ -1661,6 +1935,18 @@ def run_once(args: argparse.Namespace) -> int:
                 return 2
             print(f"[维度] region={len(dims.regions)} measure={len(dims.measures)} "
                   f"primary={len(dims.primary)} channel={len(dims.channels)}")
+
+            # 文件级幂等：按 SHA-256 跳过已成功导入的文件
+            if args.skip_imported and not args.force:
+                imported = existing_batch_hashes(conn)
+                before = len(inputs)
+                inputs = [i for i in inputs if i.sha256 not in imported]
+                skipped = before - len(inputs)
+                if skipped:
+                    print(f"[幂等] --skip-imported：跳过已导入文件 {skipped} 个")
+                if not inputs:
+                    print("[完成] 所有输入文件均已导入，无需重复写库。")
+                    return 0
 
             frames = []
             for inp in inputs:
@@ -1715,6 +2001,7 @@ def run_once(args: argparse.Namespace) -> int:
                     "dims": dims,
                     "points": points,
                     "curated": curated,
+                    "load_stats": stats,
                 }
                 record, row_issues = evaluate_row(row, ctx)
                 issues.extend(row_issues)
@@ -1736,6 +2023,9 @@ def run_once(args: argparse.Namespace) -> int:
                         records.append(record)
 
             existing = load_existing(conn)
+            if existing is None:
+                print("[中止] 无法读取现有事实表，为避免误覆盖，本次不写库。")
+                return 2
             write_stats, db_issues = write_records(conn, records, existing, args)
             issues.extend(db_issues)
             stats.inserted = write_stats.inserted
@@ -1744,6 +2034,8 @@ def run_once(args: argparse.Namespace) -> int:
             stats.db_errors = write_stats.db_errors
 
             write_reports(report_dir, stats, issues, records, inputs, dims, args, write_stats)
+            write_load_manifest(report_dir, out_root, started_at, stats, inputs, dims, args, write_stats)
+            record_import_batch(conn, inputs, stats, write_stats, args)
 
             print("\n" + "-" * 60)
             print(
@@ -1758,6 +2050,7 @@ def run_once(args: argparse.Namespace) -> int:
 
             if args.fail_on_error and (stats.hard_rejects or stats.db_errors):
                 return 1
+            state["status"] = "ok" if write_stats.db_errors == 0 else "failed"
             return 0
         finally:
             try:
@@ -1841,12 +2134,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     db.add_argument("--ask-password", action="store_true", help="交互输入密码")
 
     inp = parser.add_argument_group("输入")
-    inp.add_argument("--input-dir", default=None, help="输入根或单个运行目录；默认 techfin_common_output")
+    inp.add_argument("--input-dir", default=None, help="输入根或单个运行目录；默认 data 数据根")
     inp.add_argument("--input-file", action="append", default=None, help="显式指定 points_resolved.csv，可重复")
     inp.add_argument("--all-runs", action="store_true", help="合并所有运行目录的 points_resolved.csv")
     inp.add_argument("--points-file", default=None, help="证据级 CSV；默认自动查找 points_delta.csv / techfin_a101_points.csv")
     inp.add_argument("--curated-file", default=None, help="文章级 CSV；默认 curated_corpus.csv")
-    inp.add_argument("--output-dir", default=None, help="覆盖技术输出根目录")
+    inp.add_argument("--output-dir", default=None, help="覆盖流水线数据根（topic_config.DATA_ROOT）")
     inp.add_argument("--limit", type=int, default=None, help="最多处理 N 行，便于试跑")
 
     policy = parser.add_argument_group("过滤策略")
@@ -1861,13 +2154,31 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     policy.add_argument("--allow-partial-batch", action="store_true", help="允许补充公布/更名/搬迁等批次值")
     policy.add_argument("--allow-approx", action="store_true", help="允许约数（约/余/突破等）")
     policy.add_argument("--allow-low-confidence-year", action="store_true", help="允许 doc/window 低置信年份")
+    policy.add_argument("--allow-region-query", action="store_true",
+                        help="允许 region_from=query/none/scope_national 的县级行入库（默认拒绝）")
+    policy.add_argument("--allow-breakdown", action="store_true",
+                        help="允许 aggregation_type=breakdown 的拆分口径值入库（默认拒绝）")
+    policy.add_argument("--allow-inactive-index", action="store_true",
+                        help="允许 dim_index.status 非 active（retired/draft）的指标入库（默认拒绝）")
+    policy.add_argument("--allow-unverified-evidence", action="store_true",
+                        help="允许 evidence_verified=0 的 LLM 数据点入库（默认拒绝）")
 
     run = parser.add_argument_group("运行")
     run.add_argument("--dry-run", action="store_true", help="只校验和出报告，不写库")
     run.add_argument("--upsert-policy", choices=("overwrite", "better", "skip"), default="overwrite",
                      help="重复键策略")
     run.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE, help="每批 executemany 行数")
-    run.add_argument("--report-dir", default=None, help="报告目录；默认新建 YYYY.M.D-N 运行目录")
+    run.add_argument("--write-mode", choices=("transaction", "chunked"), default="transaction",
+                     help="transaction=全部成功才提交（默认）；chunked=逐批提交（允许部分写入）")
+    run.add_argument("--on-db-error", choices=("abort", "isolate"), default="abort",
+                     help="transaction 模式下 DB 错误的处理：abort=整批回滚（默认）；isolate=逐行重试")
+    run.add_argument("--skip-imported", action="store_true",
+                     help="按 file_sha256 跳过 import_batch 中已成功导入的文件")
+    run.add_argument("--force", action="store_true",
+                     help="与 --skip-imported 配合，强制重新导入")
+    run.add_argument("--report-dir", default=None, help="报告目录；指定后直接使用（可能覆盖同名报告）")
+    run.add_argument("--report-root", default=None,
+                     help="入库报告根；默认 topic_config.LOAD_REPORT_ROOT，报告在其下新建运行目录")
     run.add_argument("--fail-on-error", action="store_true", help="存在 hard 拒绝或 DB 错误时退出码 1")
     run.add_argument("--dump-mapping", action="store_true", help="打印指标口径/单位映射后退出")
     run.add_argument("--self-test", action="store_true", help="运行纯函数自测后退出")

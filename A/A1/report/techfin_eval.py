@@ -46,7 +46,7 @@ sys.path.insert(0, str(_TOPIC_DIR / "config"))  # → topic_config / extract_con
 # （配置目录已由上面的主题目录引导加入 sys.path）
 
 import topic_config as cfg       # noqa: E402
-from crawler_common import resolve_output_root  # noqa: E402
+from paths import pipeline_root, resolve_cache_path  # noqa: E402
 
 SEED = 42
 LABEL_COLS = ["point_id", "article_id", "extract_method", "context_type", "authority",
@@ -91,7 +91,7 @@ def _norm(s):
     return re.sub(r"\s+", " ", s or "").strip()
 
 
-def _excerpt(obj, p):
+def _excerpt(obj, p, cache_dir=None):
     """取证据片段±200字上下文（正文按 evidence_locator 定位；附件/无定位则用 evidence_snippet）。"""
     if not obj:
         return _norm(p.get("evidence_snippet", ""))
@@ -103,7 +103,9 @@ def _excerpt(obj, p):
         name = es.split(":", 1)[1]
         for a in obj.get("attachments", []) or []:
             if a.get("filename") == name:
-                tp = a.get("text_path", "")
+                tp = (str(resolve_cache_path(cache_dir, a.get("text_path", ""),
+                                             a.get("text_rel", "")))
+                      if cache_dir else a.get("text_path", ""))
                 if tp and os.path.exists(tp):
                     try:
                         txt = open(tp, encoding="utf-8").read()
@@ -131,7 +133,9 @@ def make_template(out_root, n):
     rows = []
     for _, r in sample.iterrows():
         d = {c: r.get(c, "") for c in LABEL_COLS[:14]}
-        d["context_excerpt"] = _excerpt(cache.get(r.get("article_id", "")), r)
+        d["context_excerpt"] = _excerpt(
+            cache.get(r.get("article_id", "")), r,
+            cache_dir=str(Path(out_root) / cfg.BODY_CACHE_DIR))
         d["人工标签"] = ""
         d["人工年限"] = ""
         d["备注"] = ""
@@ -270,7 +274,7 @@ def parse_args(argv=None):
 
 def main(argv=None):
     args = parse_args(argv)
-    out_root = resolve_output_root(_TOPIC_DIR, cfg.OUTPUT_ROOT, args.output_dir)
+    out_root = pipeline_root(_TOPIC_DIR, args.output_dir)
     if args.make_template is not None:
         make_template(out_root, args.make_template)
     elif args.score:
