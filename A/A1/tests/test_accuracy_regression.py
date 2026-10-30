@@ -31,8 +31,11 @@ sys.path[:0] = [
 import pandas as pd  # noqa: E402
 
 import crawler_common as cc  # noqa: E402
+# noinspection PyUnresolvedReferences
 import region_rules as rr  # noqa: E402
+# noinspection PyUnresolvedReferences
 import techfin_extract_points as ep  # noqa: E402
+# noinspection PyUnresolvedReferences
 import techfin_load_to_db as loader  # noqa: E402
 
 FAILS: list[str] = []

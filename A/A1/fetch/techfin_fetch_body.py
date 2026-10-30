@@ -65,7 +65,9 @@ sys.path.insert(0, str(_TOPIC_DIR / "config"))  # → topic_config / extract_con
 
 # （配置目录已由上面的主题目录引导加入 sys.path）
 
+# noinspection PyUnresolvedReferences
 import topic_config as cfg  # noqa: E402
+# noinspection PyUnresolvedReferences
 from paths import finish_run_manifest, new_pipeline_run, pipeline_root  # noqa: E402
 from crawler_common import (  # noqa: E402
     append_progress,

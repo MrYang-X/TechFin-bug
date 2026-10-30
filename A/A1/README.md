@@ -85,6 +85,45 @@ report/verify_corpus.py           ──读①②─→ 两个累积总库 ─�
 > 分别加进 `sys.path`，并把**主题目录 A/A1** 作为输出锚点。写成"逐级向上找"故不写死层数，
 > `A/A1`、`B/B2` 或更深的目录都能用。
 
+### PyCharm 未解析 `paths` 的原因与解决办法
+
+**现象**：在 PyCharm 中打开 `run_all.py`，`from paths import pipeline_root` 这一行会报两条红标：
+`未解析的引用 'paths'` 和 `未解析的引用 'pipeline_root'`。`topic_config`、`extract_config`、
+`region_rules`，以及测试里跨目录导入的 `techfin_*` 属于同一类问题。
+
+**原因**：`config/paths.py` 位于 `A/A1/config/`，脚本靠运行时的
+`sys.path.insert(0, str(_TOPIC_DIR / "config"))` 才把该目录加入模块搜索路径。PyCharm 的静态分析
+不会执行 `sys.path.insert`，`A/A1/config` 又不在项目的源根里；而 `.idea/` 被 `.gitignore` 整体忽略，
+在 IDE 里把 `config` 手动标成 Sources root 只对本机有效，无法随仓库分发。
+
+**解决办法**：在这类动态 `import` 语句的**紧邻上一行**加 `# noinspection PyUnresolvedReferences`。
+
+```python
+# noinspection PyUnresolvedReferences
+from paths import pipeline_root  # noqa: E402
+```
+
+```python
+# noinspection PyUnresolvedReferences
+from paths import (  # noqa: E402
+    finish_run_manifest,
+    new_pipeline_run,
+    pipeline_root,
+)
+```
+
+该注释只对 PyCharm 的静态检查生效，不改变任何运行时行为。放置规则：
+
+- 必须紧贴被抑制的 import 上一行，中间不要再隔其它注释；`# noqa: E402` 保留在 import 行上。
+- 多行 `from ... import (...)` 放在 `from` 行的上一行（不要放进括号里）。
+- `try` 块/函数内的惰性导入放在该 import 的上一行，缩进与 import 对齐。
+- `crawler_common` 位于仓库根、可正常解析，无需注释。
+- 如果本机同时把 `A/A1/config` 标成了 Sources root，这些注释会被提示为「冗余抑制」弱警告；
+  仓库统一以注释方案为准，可移除源根或忽略该提示。
+
+新增或搬运脚本时请照此办理。**自检**：`run_all.py` 中的 `from paths import pipeline_root` 不应再有
+红标，且 `python run_all.py --list` 仍能正常执行。
+
 ### 文件清单（作用 / 输入 / 输出）
 
 | 文件 | 作用 | 输入 | 输出 |

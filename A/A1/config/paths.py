@@ -25,6 +25,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
+# noinspection PyUnresolvedReferences
 import topic_config as cfg
 
 # paths.py 位于 A/A1/config/，上一级即主题目录 A/A1

@@ -36,6 +36,7 @@ _REPO_ROOT = next((p for p in TOPIC_DIR.parents if (p / "crawler_common.py").exi
 if _REPO_ROOT is not None:
     sys.path.insert(0, str(_REPO_ROOT))
 sys.path.insert(0, str(TOPIC_DIR / "config"))
+# noinspection PyUnresolvedReferences
 from paths import pipeline_root  # noqa: E402
 
 # 顺序即执行顺序；limit=True 的步支持 `--limit N`

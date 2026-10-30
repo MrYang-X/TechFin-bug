@@ -25,7 +25,9 @@ from __future__ import annotations
 
 from collections import namedtuple
 
+# noinspection PyUnresolvedReferences
 import extract_config as ec
+# noinspection PyUnresolvedReferences
 import topic_config as cfg
 
 RegionHit = namedtuple(

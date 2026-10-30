@@ -75,7 +75,9 @@ if not (_REPO_ROOT and _TOPIC_DIR):
 sys.path.insert(0, str(_REPO_ROOT))
 sys.path.insert(0, str(_TOPIC_DIR / "config"))
 
+# noinspection PyUnresolvedReferences
 import topic_config as cfg  # noqa: E402
+# noinspection PyUnresolvedReferences
 from paths import (  # noqa: E402
     file_fingerprint,
     finish_run_manifest,

@@ -50,8 +50,11 @@ sys.path.insert(0, str(_TOPIC_DIR / "config"))  # → topic_config / extract_con
 
 # （配置目录已由上面的主题目录引导加入 sys.path）
 
+# noinspection PyUnresolvedReferences
 import topic_config as cfg  # noqa: E402
+# noinspection PyUnresolvedReferences
 import region_rules as rr   # noqa: E402
+# noinspection PyUnresolvedReferences
 from paths import finish_run_manifest, new_pipeline_run, pipeline_root  # noqa: E402
 from crawler_common import (  # noqa: E402
     clean_text,
@@ -208,6 +211,7 @@ def build_indicator_families():
                 "level2_code": l2, "level2_name": node["level2_name"],
             }
     try:
+        # noinspection PyUnresolvedReferences
         import extract_config as ec
         if "A101" in fams:
             for t in ec.A101_TERMS:

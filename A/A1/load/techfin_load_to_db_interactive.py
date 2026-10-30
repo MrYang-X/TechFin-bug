@@ -56,6 +56,7 @@ if _REPO_ROOT is not None:
     except Exception:
         RUN_DIR_RE = re.compile(r"^(\d{4})\.(\d{1,2})\.(\d{1,2})-(\d+)$")
     try:
+        # noinspection PyUnresolvedReferences
         from paths import load_report_root, pipeline_root  # noqa: E402
         _OUT_ROOT = pipeline_root(_TOPIC_DIR)
         _LOAD_ROOT = load_report_root(_TOPIC_DIR)
