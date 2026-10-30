@@ -1,5 +1,5 @@
 """
-科技金融指数研究 · ⑥ 评估闭环（人工标注 → precision/recall）
+科技金融指数研究 · 评估闭环（techfin_eval.py：人工标注 → precision/recall）
 
 职责：把"精确"变成**可度量、可复现**的闭环。纯本地、只读数据点 CSV + 正文缓存，
 产物落在 `<OUT_ROOT>/eval/`（**固定目录，不随运行轮次变**，因为标注文件要跨轮复用）。
@@ -264,7 +264,7 @@ def score_recall(out_root):
 
 
 def parse_args(argv=None):
-    ap = argparse.ArgumentParser(description=f"{cfg.TOPIC_LABEL} · ⑥ 评估闭环")
+    ap = argparse.ArgumentParser(description=f"{cfg.TOPIC_LABEL} · 评估闭环")
     ap.add_argument("--output-dir")
     g = ap.add_mutually_exclusive_group(required=True)
     g.add_argument("--make-template", type=int, metavar="N", help="生成标注模板（抽 N 条数据点）")

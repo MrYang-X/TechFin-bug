@@ -1,20 +1,24 @@
 """
-科技金融指数研究 · ② 二级抓取：正文 + 文字型附件（三段流水线的第二段）
+科技金融指数研究 · 二级抓取（techfin_fetch_body.py）：正文 + 文字型附件
 
-职责：从①产出的 URL 语料（tech_fin_news.csv / techfin_official.csv）出发，对每条链接
+职责：从 collect/TechFin-bug.py 与 collect/techfin_authoritative.py
+产出的 URL 语料（tech_fin_news.csv / techfin_official.csv）出发，对每条链接
 二次请求，抓取 **HTML 正文** 与 **文字型附件（PDF/doc/docx/xls/xlsx，不含扫描件 OCR）**，
 把结果落进【跨轮持久缓存】body_cache/。
 
 为什么单独成段、且缓存放输出根而不放运行目录：
-  - 抽取规则（③ techfin_extract_points.py）会高频迭代；把"抓取"与"抽取"解耦，
+  - 抽取规则（techfin_extract_points.py）会高频迭代；把"抓取"与"抽取"解耦，
     改规则时**不必重抓政府网站**（抓取最贵、最易被限流）。缓存跨轮复用正是为此。
-  - 与①一样，本脚本**不 import 任何业务脚本**，只读①产出的 CSV、只写自己的产物，
+  - 与两个采集脚本一样，本脚本**不 import 任何业务脚本**，只读它们产出的 CSV、只写自己的产物，
     通过文件耦合（见 README 的依赖图）。
 
 依赖（缺省均可降级，不阻断流程）：
-  pip install trafilatura pdfplumber python-docx openpyxl xlrd olefile
-  - trafilatura 缺失 → 降级 BeautifulSoup(html.parser) 正文启发式（bs4 已随①安装）
-  - python-docx 缺失 → 用 zipfile 读 word/document.xml 正则兜底（零依赖）
+  pip install -r ../../requirements.txt
+  - 硬依赖：pandas / requests / beautifulsoup4（正文兜底）
+  - 可选：trafilatura（优先正文抽取）、pdfplumber（PDF）、openpyxl（xlsx）、xlrd（旧 xls）
+  - docx 由标准库 zipfile 读 word/document.xml（零依赖，不依赖 python-docx）
+  - python-docx / olefile 未在代码中使用，无需安装
+  - trafilatura 缺失 → 降级 BeautifulSoup(html.parser) 正文启发式
   - pdfplumber 缺失 → PDF 正文留空并标记，不静默丢
   本机限制：无 brotli，故请求头沿用 crawler_common.get_random_headers（只声明 gzip,deflate），
   不要自定义 Accept-Encoding。
@@ -626,9 +630,9 @@ def load_targets(out_root, kinds=("search", "official"), limit=None, offset=0):
 
 def load_curated_queue(out_root):
     """
-    ④ 产出的"优先补抓队列"：curated_corpus.csv 里【相关但尚无正文】的文章
+    techfin_curate.py 产出的"优先补抓队列"：curated_corpus.csv 里【相关但尚无正文】的文章
     + curated_uncertain.csv 里【官方泛化标题待确认】的文章。返回 article_id 集合。
-    用于 --from-curated：让 ② 只抓高相关的几十条，不再盲抓整库。
+    用于 --from-curated：让本脚本只抓高相关的几十条，不再盲抓整库。
     """
     ids = set()
     p1 = out_root / cfg.CURATED_ACCUMULATOR
@@ -656,7 +660,7 @@ def load_curated_queue(out_root):
 
 def run_once(run_dir, paths, cache_dir, targets, refresh=False, save_html=False):
     print("=" * 60)
-    print(f"{cfg.TOPIC_LABEL} · ② 二级抓取（正文 + 文字型附件）")
+    print(f"{cfg.TOPIC_LABEL} · 二级抓取（正文 + 文字型附件）")
     print("=" * 60)
     print(f"待抓条数：{len(targets)}")
     print(f"缓存目录：{cache_dir}")
@@ -739,7 +743,7 @@ def artifact_paths(run_dir):
 
 def parse_args(argv=None):
     ap = argparse.ArgumentParser(
-        description=f"{cfg.TOPIC_LABEL} · ② 二级抓取（正文 + 文字型附件）")
+        description=f"{cfg.TOPIC_LABEL} · 二级抓取（正文 + 文字型附件）")
     ap.add_argument("--output-dir",
                     help="数据根目录（覆盖 topic_config.DATA_ROOT）")
     ap.add_argument("--kinds", nargs="*", default=["search", "official"],
@@ -749,7 +753,7 @@ def parse_args(argv=None):
     ap.add_argument("--refresh", action="store_true",
                     help="忽略缓存与续跑台账，全量重抓")
     ap.add_argument("--from-curated", action="store_true",
-                    help="只抓 ④ 挑出的待抓队列（相关但无正文 + 泛化标题待确认），"
+                    help="只抓 techfin_curate.py 挑出的待抓队列（相关但无正文 + 泛化标题待确认），"
                          "不再盲抓整库；需先运行 techfin_curate.py")
     ap.add_argument("--save-html", action="store_true",
                     help="额外保存原始 HTML 的 gzip 快照（body_cache/raw_html/<aid>.html.gz），"
@@ -769,7 +773,7 @@ def main(argv=None):
         queue = load_curated_queue(out_root)
         before = len(targets)
         targets = targets[targets["article_id"].isin(queue)].reset_index(drop=True)
-        print(f"[队列] --from-curated：{before} 条 → 只抓 ④ 挑出的 {len(targets)} 条")
+        print(f"[队列] --from-curated：{before} 条 → 只抓 techfin_curate.py 挑出的 {len(targets)} 条")
     if targets.empty:
         print("[中止] 没有可抓的语料（请先运行 TechFin-bug.py / techfin_authoritative.py）。")
         return

@@ -1,18 +1,19 @@
 """
-科技金融指数研究 · ④ 语料清洗/提纯（三段流水线之上的"清洗环节"）
+科技金融指数研究 · 语料清洗/提纯（techfin_curate.py）
 
-职责：读 ① 的两份累积总库（+ 可选读 ② 的正文缓存 body_cache/），做**纯本地**清洗：
+职责：读两个采集脚本（TechFin-bug.py / techfin_authoritative.py）的两份累积总库
+（+ 可选读 techfin_fetch_body.py 的正文缓存 body_cache/），做**纯本地**清洗：
 相关性提纯、规范化、链接去重、质量分级、事件分组，产出：
   - curated_corpus.csv      文章级"干净语料"（一行一篇，含 relevance/quality/region 等富化列）
-  - curated_uncertain.csv   官方"泛化标题"待正文确认队列（供 ② 补抓）
+  - curated_uncertain.csv   官方"泛化标题"待正文确认队列（供 techfin_fetch_body.py 补抓）
   - curated_dropped.csv     被剔除条目（含原因，便于复核）
   - curated_report.md       清洗报告（漏斗逐级计数、分布、抽检样本）
 
 **不发任何网络请求**；**不 import 任何业务脚本**（只读 crawler_common / topic_config / 可选 extract_config）；
 全量重算（幂等），新语料来了重跑即可。仿 verify_corpus.py 的「只读上游→本地变换→写产物」模式。
 
-核心判断：① 里【检索语料】已被 is_relevant 的 token-AND + 地区约束筛过，④ 只做规范化/去重/分级；
-【官方语料】在 ① 是零过滤全量保存（446 条里仅约 25 条与 A101 相关），故 ④ 承担相关性提纯重任。
+核心判断：TechFin-bug.py 里【检索语料】已被 is_relevant 的 token-AND + 地区约束筛过，本脚本只做规范化/去重/分级；
+【官方语料】在 techfin_authoritative.py 是零过滤全量保存（大多数与指标无关），故本脚本承担相关性提纯重任。
 
 用法：
   python techfin_curate.py                 # 生成清洗产物到最新运行目录 + 输出根
@@ -71,7 +72,7 @@ from crawler_common import (  # noqa: E402
 CURATOR_VERSION = "curate-v1"   # 规则版本；改规则即 bump，输出带版本保证跨轮可比
 RELEVANT_SCORE_MIN = 3          # 相关性通过阈值（= 单级标题/正文命中）
 EVENT_SIM_THRESHOLD = 0.82      # 事件分组标题相似度阈值
-TITLE_MIN_LEN = 5               # 与 ① 清洗一致
+TITLE_MIN_LEN = 5               # 与采集脚本的标题清洗阈值一致
 
 # 追踪参数白名单：只删这些，绝不删路径段与内容参数
 TRACKING_PARAM_PREFIXES = ("utm_", "spm", "share_", "share_token")
@@ -168,7 +169,7 @@ def url_dedup_key(url):
     return hashlib.md5(canonical_url(url).encode("utf-8")).hexdigest()[:16]
 
 
-# ==================== 地区索引（不 import ③，自带一份）====================
+# ==================== 地区索引（统一走 config/region_rules.py）====================
 
 def build_region_index():
     """兼容旧调用：地区索引统一由 config/region_rules.py 构建。"""
@@ -335,7 +336,7 @@ def classify_source(row, url):
 
 
 def grade_quality(src_class, rel, has_body):
-    """→ fact_tech_finance_data.data_quality 的 1-4。返回 (grade, reason)。"""
+    """→ fact_index_value.data_quality 的 1-4。返回 (grade, reason)。"""
     relevant = rel["rel_score"] >= RELEVANT_SCORE_MIN
     has_num = rel["n_number_statements"] > 0
     if src_class == "stat_doc":
@@ -597,13 +598,13 @@ def curate_rows(df, body_index, fams, idx):
     for _, r in df.iterrows():
         row = r.to_dict()
         url = str(row.get("url", "") or "").strip()
-        # ① 噪声源
+        # 噪声源
         if is_noise_source(url, str(row.get("source", "") or ""),
                            cfg.NOISE_DOMAINS, cfg.NOISE_SOURCES, cfg.NOISE_URL_SUFFIXES):
             funnel["noise"] += 1
             dropped.append(_drop_entry(row, "noise"))
             continue
-        # ② 空/废标题
+        # 空/废标题
         tc = normalize_text(str(row.get("title", "") or ""))
         if len(tc) < TITLE_MIN_LEN or (looks_like_url_title(tc) and not row.get("summary")):
             funnel["empty"] += 1
@@ -611,12 +612,12 @@ def curate_rows(df, body_index, fams, idx):
             continue
         rows.append(_enrich(row, body_index.get(str(row.get("article_id", "") or "")), fams, idx))
 
-    # ③ 链接级去重
+    # 链接级去重
     kept, dups = dedup_by_url(rows)
     funnel["dup"] += len(dups)
     dropped.extend(dups)
 
-    # ④ 相关性提纯
+    # 相关性提纯
     final, uncertain = [], []
     for r in kept:
         if r["rel_score"] >= RELEVANT_SCORE_MIN:
@@ -630,7 +631,7 @@ def curate_rows(df, body_index, fams, idx):
             dropped.append(_drop_entry(r, "irrelevant"))
             funnel["irrelevant"] += 1
 
-    # ⑦ 事件分组（只标注）+ 近重复标注（只标注、不删除）
+    # 事件分组（只标注）+ 近重复标注（只标注、不删除）
     annotate_near_dups(final)
     group_events(final)
     return final, dropped, uncertain, funnel
@@ -689,7 +690,7 @@ def build_report(funnel, final, dropped, uncertain, body_index, sample_n=20):
     L.append("")
 
     if uncertain:
-        L.append(f"## 6. 待确认队列（官方泛化标题，供②补抓）{len(uncertain)} 条\n")
+        L.append(f"## 6. 待确认队列（官方泛化标题，供 techfin_fetch_body.py --from-curated 补抓）{len(uncertain)} 条\n")
         for i, u in enumerate(uncertain[:sample_n], 1):
             L.append(f"{i}. {str(u.get('title'))[:60]} | {u.get('source')}")
         L.append("")
@@ -709,7 +710,7 @@ def artifact_paths(run_dir):
 
 def parse_args(argv=None):
     ap = argparse.ArgumentParser(
-        description=f"{cfg.TOPIC_LABEL} · ④ 语料清洗/提纯")
+        description=f"{cfg.TOPIC_LABEL} · 语料清洗/提纯")
     ap.add_argument("--output-dir", help="数据根目录（覆盖 topic_config.DATA_ROOT）")
     ap.add_argument("--sample", type=int, default=20, help="报告抽检样本数（默认 20）")
     return ap.parse_args(argv)
@@ -717,12 +718,12 @@ def parse_args(argv=None):
 
 def run_once(run_dir, paths, out_root, sample_n):
     print("=" * 60)
-    print(f"{cfg.TOPIC_LABEL} · ④ 语料清洗/提纯")
+    print(f"{cfg.TOPIC_LABEL} · 语料清洗/提纯")
     print("=" * 60)
 
     df = load_inputs(out_root)
     if df.empty:
-        print("[中止] 没有可清洗的语料（请先运行 ① 采集脚本）。")
+        print("[中止] 没有可清洗的语料（请先运行 collect/TechFin-bug.py / collect/techfin_authoritative.py）。")
         return
     body_index = load_body_index(str(out_root / cfg.BODY_CACHE_DIR))
     fams = build_indicator_families()

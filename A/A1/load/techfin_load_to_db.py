@@ -1,5 +1,5 @@
 """
-科技金融指数研究 · ⑦ CSV → MySQL 数据迁移/入库（可选后处理）
+科技金融指数研究 · CSV → MySQL 数据迁移/入库（techfin_load_to_db.py，可选后处理）
 
 职责：读取流水线数据根 `A/A1/data/` 中的聚合级数据（默认最新一轮
 `*/points_resolved.csv`），用证据级 `techfin_a101_points.csv` / `points_delta.csv`
@@ -30,10 +30,10 @@
 
   # 指定输入文件 / 合并所有轮次
   python A/A1/load/techfin_load_to_db.py \
-      --input-file data/2026.10.19-6/points_resolved.csv
+      --input-file <数据根>/<运行目录>/points_resolved.csv
   python A/A1/load/techfin_load_to_db.py --all-runs
 
-  # 放行“补充公布/更名/搬迁”等批次值（当前数据可写入 1 行）
+  # 放行“补充公布/更名/搬迁”等批次值
   python A/A1/load/techfin_load_to_db.py --allow-partial-batch
 
   # 纯函数自测 / 查看口径映射
@@ -1812,7 +1812,7 @@ def write_reports(
     lines.append("## 9. 重要提示")
     lines.append("")
     lines.append("- `agreement=True` 不代表有可用主值；空值仍按 `EMPTY_VALUE` 跳过。")
-    lines.append("- A103 默认阻断：当前证据级 A103 全部是 `count/家`，与 `share/%` 定义不符。")
+    lines.append("- A103 默认阻断：A103 证据点通常为 `count/家`，与 `share/%` 定义不符。")
     lines.append("- 单位存实际观测单位，不做跨单位换算；`value_text` 保留原文。")
     lines.append("- `fact_index_value` 唯一键为 `(region_code, year, level3_code, measure_code, context_type)`，重复执行是幂等的。")
     (report_dir / "load_report.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -1902,7 +1902,7 @@ def _run_once(args: argparse.Namespace, state: dict[str, Any]) -> int:
 
     with run_logging(report_dir / "load_log"):
         print("=" * 60)
-        print(f"{cfg.TOPIC_LABEL} · ⑦ CSV → MySQL 入库")
+        print(f"{cfg.TOPIC_LABEL} · CSV → MySQL 入库")
         print("=" * 60)
         print(f"数据根目录：{out_root}")
         print(f"报告目录：{report_dir}")
@@ -2123,7 +2123,7 @@ def self_test() -> int:
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description=f"{cfg.TOPIC_LABEL} · ⑦ CSV → MySQL 数据迁移/入库",
+        description=f"{cfg.TOPIC_LABEL} · CSV → MySQL 数据迁移/入库",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     db = parser.add_argument_group("数据库")

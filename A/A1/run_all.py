@@ -1,7 +1,8 @@
 """
 科技金融指数研究 · 一键按序跑（A/A1 根目录入口）
 
-按流水线顺序调用各子目录脚本，省去记命令：①采集 → ②抓取 → ⑤OCR → ④清洗 → ③抽取 → ③验报告。
+按流水线顺序调用各子目录脚本，省去记命令：
+TechFin-bug.py / techfin_authoritative.py → techfin_fetch_body.py → techfin_ocr.py → techfin_curate.py → techfin_extract_points.py → verify_points.py。
 
 - 默认只跑【处理链】（fetch → ocr → clean → extract → verify），**不跑采集器**——
   采集受百度 IP 限流，通常单独多轮跑。要一并跑采集加 `--collect`。
@@ -41,13 +42,13 @@ from paths import pipeline_root  # noqa: E402
 
 # 顺序即执行顺序；limit=True 的步支持 `--limit N`
 STEPS = [
-    {"key": "collect-search",   "label": "①-a 搜索引擎采集", "script": "collect/TechFin-bug.py",           "limit": True},
-    {"key": "collect-official", "label": "①-b 官方源采集",   "script": "collect/techfin_authoritative.py", "limit": False},
-    {"key": "fetch",            "label": "② 二级抓取",        "script": "fetch/techfin_fetch_body.py",      "limit": True},
-    {"key": "ocr",              "label": "⑤ OCR 补全",        "script": "fetch/techfin_ocr.py",             "limit": True},
-    {"key": "clean",            "label": "④ 语料清洗",        "script": "clean/techfin_curate.py",          "limit": False},
-    {"key": "extract",          "label": "③ 数值抽取",        "script": "extract/techfin_extract_points.py", "limit": True},
-    {"key": "verify",           "label": "③验 数据点报告",    "script": "report/verify_points.py",          "limit": False},
+    {"key": "collect-search",   "label": "搜索引擎采集", "script": "collect/TechFin-bug.py",           "limit": True},
+    {"key": "collect-official", "label": "官方源采集",   "script": "collect/techfin_authoritative.py", "limit": False},
+    {"key": "fetch",            "label": "二级抓取",     "script": "fetch/techfin_fetch_body.py",      "limit": True},
+    {"key": "ocr",              "label": "OCR 补全",     "script": "fetch/techfin_ocr.py",             "limit": True},
+    {"key": "clean",            "label": "语料清洗",     "script": "clean/techfin_curate.py",          "limit": False},
+    {"key": "extract",          "label": "数值抽取",     "script": "extract/techfin_extract_points.py", "limit": True},
+    {"key": "verify",           "label": "数据点报告",   "script": "report/verify_points.py",          "limit": False},
 ]
 DEFAULT_KEYS = ["fetch", "ocr", "clean", "extract", "verify"]
 VALID_KEYS = [s["key"] for s in STEPS]
@@ -128,7 +129,7 @@ def build_argv_from_menu():
     for s in STEPS:
         default = s["key"] in DEFAULT_KEYS
         extra = "（受百度 IP 限流，通常单独多轮跑）" if s["key"] == "collect-search" else ""
-        if ask_yes_no(f"{s['label']}（{s['key']}）是否执行？{extra}", default):
+        if ask_yes_no(f"{s['label']}（{s['script']}）是否执行？{extra}", default):
             keys.append(s["key"])
 
     if not keys:
@@ -191,7 +192,7 @@ def main(argv=None):
             print("\n[中止] 用户中断，后续步骤不再执行。")
             return 130
         if rc != 0:
-            print(f"\n[中止] 第 {i} 步 `{s['key']}` 退出码 {rc}；后续步骤不再执行。")
+            print(f"\n[中止] 第 {i} 步「{s['label']}」退出码 {rc}；后续步骤不再执行。")
             return rc
     print(f"\n[完成] {len(steps)} 步全部成功。")
     return 0

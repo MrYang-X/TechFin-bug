@@ -314,7 +314,7 @@ ON DUPLICATE KEY UPDATE
 
 原文是“2019 年广州有效期内的高新技术企业有 12099 家”，属于 A101，不是 A103。盲导会得到“A103 = 12099%”。
 
-> 2026-10 起，③ 抽取层已强制规则层只产 A101，并做指标-口径-单位一致性校验；
+> 2026-10 起，`extract/techfin_extract_points.py`（抽取层）已强制规则层只产 A101，并做指标-口径-单位一致性校验；
 > 不合格点写入 `points_dropped.csv`。loader 仍保留 `--block-level3 A103` 作为最后一道闸门。
 
 loader 必须做：
@@ -330,7 +330,7 @@ loader 必须做：
 > 假阳性和地区串区；先跑 `--dry-run`，查看 `load_report.md` / `load_errors.csv`，再决定是否
 > 用 `--allow-partial-batch` / `--include-missing` / `--include-non-actual` 放行。
 > 交互式入口：`A/A1/load/techfin_load_to_db_interactive.py`（菜单式，默认预演）。
-> 详细用法见 [`A/A1/README.md`](../A/A1/README.md) 的 ⑦ 小节。
+> 详细用法见 [`A/A1/README.md`](../A/A1/README.md) 的「CSV → MySQL 入库」一节。
 
 ---
 

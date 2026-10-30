@@ -1,5 +1,5 @@
 """
-科技金融指数研究 · ⑦ 交互式 CSV → MySQL 入库入口
+科技金融指数研究 · 交互式 CSV → MySQL 入库入口（techfin_load_to_db_interactive.py）
 
 职责：用中文菜单逐步询问数据库、输入来源、过滤策略和高级选项，然后通过**子进程**
 调用 `techfin_load_to_db.py`。交互层不复制 loader 的校验/写库逻辑，只负责拼参数、
@@ -254,7 +254,7 @@ def collect_input_choice() -> tuple[list[str] | None, str, Path | None]:
     if choice == "latest":
         runs = discover_runs()
         if not runs:
-            print("[提示] 未找到 points_resolved.csv，请先运行 ③ 数值抽取。")
+            print("[提示] 未找到 points_resolved.csv，请先运行 extract/techfin_extract_points.py。")
             return None, "", None
         # 显式钉住“当前最新一轮”作为输入；报告始终由 loader 在入库报告根下新建
         path = runs[-1][1].parent
@@ -263,7 +263,7 @@ def collect_input_choice() -> tuple[list[str] | None, str, Path | None]:
     elif choice == "run":
         runs = discover_runs()
         if not runs:
-            print("[提示] 未找到 points_resolved.csv，请先运行 ③ 数值抽取。")
+            print("[提示] 未找到 points_resolved.csv，请先运行 extract/techfin_extract_points.py。")
             return None, "", None
         options = [(name, f"{name}（{rows} 行）") for name, _path, rows in runs]
         selected = ask_choice("选择运行目录：", options, default=len(options))
@@ -472,7 +472,7 @@ def run_loader(argv: list[str], env_overrides: dict[str, str], kind: str = "run"
 
 def print_header() -> None:
     print("\n" + "=" * 60)
-    print("科技金融指数研究 · ⑦ 交互式 CSV → MySQL 入库")
+    print("科技金融指数研究 · 交互式 CSV → MySQL 入库")
     print("=" * 60)
     print(f"loader：{_LOADER}")
     print(f"数据根：{_OUT_ROOT}")
@@ -524,7 +524,7 @@ def menu_loop() -> int:
 def main(argv: list[str] | None = None) -> int:
     global _OUT_ROOT, _LOAD_ROOT, _OUT_OVERRIDE, _REPORT_OVERRIDE
     parser = argparse.ArgumentParser(
-        description="科技金融指数研究 · ⑦ 交互式 CSV → MySQL 入库入口",
+        description="科技金融指数研究 · 交互式 CSV → MySQL 入库入口",
     )
     parser.add_argument("--output-dir", default=None, help="覆盖流水线数据根（topic_config.DATA_ROOT）")
     parser.add_argument("--report-root", default=None, help="覆盖入库报告根（topic_config.LOAD_REPORT_ROOT）")

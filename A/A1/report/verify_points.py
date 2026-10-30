@@ -1,10 +1,10 @@
 """
-科技金融指数研究 · ③验 数据点质量报告（只读语料 → 写报告，仿 verify_corpus.py 的解耦模式）
+科技金融指数研究 · 数据点质量报告（verify_points.py；只读语料 → 写报告，仿 verify_corpus.py 的解耦模式）
 
-职责：读 ③ 产出的数据点语料（证据级累积总库或某轮 points_delta），生成 Markdown 报告：
+职责：读 techfin_extract_points.py 产出的数据点语料（证据级累积总库或某轮 points_delta），生成 Markdown 报告：
   - 总量与维度分布（context_type / extract_method / authority / 指标）
   - 置信度分布
-  - 地区覆盖（124 个县级单元里有多少产出了数据点）
+  - 地区覆盖（124 个采集单元里有多少产出了数据点）
   - **多源冲突组**（同一 地区×年份×指标 出现不同数值）→ 供人工仲裁
   - 缺口：正文为空 / 扫描件被跳过的篇数（读 body_cache 索引）——让缺口始终可见
   - 随机抽检样本（含原文证据片段）→ 供人工核对精度
@@ -177,7 +177,7 @@ def build_report(df, out_root, sample_n=20):
     lines.append("## 4. 地区覆盖与缺口\n")
     got, total_units = _county_coverage(df)
     lines.append(f"- 有数据点的县级单元：{got}/{total_units}"
-                 f"（县级新闻语料天然稀疏，需结合①覆盖率一起看）")
+                 f"（县级新闻语料天然稀疏，需结合 collect/TechFin-bug.py 的采集覆盖率一起看）")
     if "region_from" in df.columns:
         n_query = int((df["region_from"] == "query").sum())
         lines.append(f"- region_from=query（无文本证据，loader 默认拒绝）：{n_query}")
@@ -218,7 +218,7 @@ def build_report(df, out_root, sample_n=20):
 
 def parse_args(argv=None):
     ap = argparse.ArgumentParser(
-        description=f"{cfg.TOPIC_LABEL} · ③验 数据点质量报告")
+        description=f"{cfg.TOPIC_LABEL} · 数据点质量报告")
     ap.add_argument("--output-dir", help="数据根目录（覆盖 topic_config.DATA_ROOT）")
     ap.add_argument("--points", help="指定数据点 CSV（默认用累积总库）")
     ap.add_argument("--sample", type=int, default=20, help="抽检样本条数（默认 20）")

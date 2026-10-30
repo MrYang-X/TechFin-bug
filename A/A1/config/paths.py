@@ -64,7 +64,7 @@ def pipeline_root(topic_dir=None, override=None) -> Path:
 
 
 def load_report_root(topic_dir=None, override=None) -> Path:
-    """解析 ⑦ 入库报告根（默认 A/A1/reports/db_load/，可用 --report-root 覆盖）。"""
+    """解析入库报告根（techfin_load_to_db.py 的产物；默认 A/A1/reports/db_load/，可用 --report-root 覆盖）。"""
     resolve_output_root, _ = _cc()
     return Path(resolve_output_root(_base_dir(topic_dir), cfg.LOAD_REPORT_ROOT, override))
 

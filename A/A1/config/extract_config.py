@@ -1,9 +1,9 @@
 """
-③ 数值抽取的**叶子配置**：规则正则 / 地区别名 / 指标定义 / LLM 契约（schema+prompt+模型）。
+数值抽取（techfin_extract_points.py）的**叶子配置**：规则正则 / 地区别名 / 指标定义 / LLM 契约（schema+prompt+模型）。
 
 为什么单独一个文件、且不 import 任何本地模块（与 topic_config.py 同级）：
-  抽取规则会高频迭代；把它与"抓取"（②）和"抽取主程序"（③）分开，改规则只动这一个文件，
-  重跑③即生效，**不必重抓政府网站**（缓存见 body_cache/）。这正是三段解耦的目的。
+  抽取规则会高频迭代；把它与"抓取"（techfin_fetch_body.py）和"抽取主程序"（techfin_extract_points.py）分开，改规则只动这一个文件，
+  重跑 techfin_extract_points.py 即生效，**不必重抓政府网站**（缓存见 body_cache/）。这正是抓取与抽取解耦的目的。
 
 本次范围：只做 A101「高新技术企业数量/密度」。
 """
@@ -209,7 +209,7 @@ FEW_SHOT = [    {
     },
 ]
 
-# ==================== 产物列定义（③ 与 ③验 共用）====================
+# ==================== 产物列定义（techfin_extract_points.py 与 report/verify_points.py 共用）====================
 # 证据级：一行 = 一个数据点（一篇文章可产生多行）。
 POINT_COLS = [
     "point_id", "article_id", "source_url", "fetch_url", "page_type",
@@ -226,9 +226,9 @@ POINT_COLS = [
     "extract_method", "confidence", "llm_model", "llm_prompt_version", "extract_time",
 ]
 
-# 聚合级：一行 = 一个 (region_code, level3_code, stat_year, metric) 格；列可直接映射 SQL
-# 的 fact_tech_finance_data（region_code/year/index_id(由 level3_code join)/source_type/
-# index_value/data_quality/data_source/evidence_ref）。
+# 聚合级：一行 = 一个 (region_code, level3_code, stat_year, metric) 格；loader 负责映射到 SQL
+# 的 fact_index_value（region_code/year/level3_code/measure_code(由 metric 查 dim_index_measure)/
+# value_num 或 value_text/value_unit/source_channel/source_ref/data_quality/evidence_ref）。
 RESOLVED_COLS = [
     "region_code", "region_name", "city_name",
     "region_from", "region_confidence", "region_evidence",

@@ -1,8 +1,8 @@
 """
-地区识别规则（③ 数值抽取与 ④ 语料清洗共用）
+地区识别规则（techfin_extract_points.py 数值抽取与 techfin_curate.py 语料清洗共用）
 
 为什么要单独一个模块：
-  - ③ 与 ④ 原先各有一份 `build_region_index` / `resolve_region`，逻辑漂移；
+  - 两个脚本原先各有一份 `build_region_index` / `resolve_region`，逻辑漂移；
   - 旧逻辑在整句/全文里找"最深别名"，句中无地区时直接回退采集时的区县，
     导致"2023 年，全市高企 13171 家"被挂到荔湾区；
   - 本模块以**数字为锚点**取前 20 / 后 10 字窗口，先看显式别名，再看范围词，
@@ -62,7 +62,7 @@ def city_names() -> dict[str, str]:
 
 
 def build_region_index() -> dict[str, tuple[str, str, str, str]]:
-    """{别名: (区划码, 显示名, 级别, 所属市)}；③④ 共用。"""
+    """{别名: (区划码, 显示名, 级别, 所属市)}；techfin_extract_points.py 与 techfin_curate.py 共用。"""
     idx: dict[str, tuple[str, str, str, str]] = {}
 
     def add(alias: str, code: str, name: str, level: str, city: str) -> None:

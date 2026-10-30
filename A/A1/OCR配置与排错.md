@@ -5,9 +5,9 @@
 >
 > 相关代码位置：
 > - 调用逻辑：`fetch/techfin_ocr.py`
-> - 参数配置块：`config/topic_config.py:847-859`
-> - 流水线编排：`run_all.py:35-43`
-> - 简述版说明：`README.md:305-324`
+> - 参数配置块：`config/topic_config.py` 的 OCR 配置段（`OCR_ENABLED` … `OCR_PREFIX`）
+> - 流水线编排：`run_all.py` 的 `STEPS` 步骤表
+> - 简述版说明：`README.md` 的「OCR 补全」一节
 
 ---
 
@@ -15,7 +15,7 @@
 
 本机（Windows 11 + Python venv）装的是 **CPU 版 `paddlepaddle` wheel**, `is_compiled_with_cuda()` 返回 `False`. 因此:
 
-- `OCR_DEVICE = "cpu"`（`topic_config.py:856`）
+- `OCR_DEVICE = "cpu"`（`topic_config.py` 中的 `OCR_DEVICE` 常量）
 - 选型、页数上限、DPI 这些参数**全部围绕"CPU 很慢"这个约束来定**
 
 ### 1.1 安装 PaddleOCR Python 库及可选依赖项
@@ -86,7 +86,7 @@ set PADDLE_PDX_MODEL_SOURCE=BOS        # Windows cmd
 
 ### 2.2 一次性下载模型
 
-`techfin_ocr.py:13-15` 与 `README.md:309-312` 都记了这条命令。构造一次 `PaddleOCR` 就会触发下载：
+`techfin_ocr.py` 的模块注释与 README 的「OCR 补全」一节都记了这条命令。构造一次 `PaddleOCR` 就会触发下载：
 
 ```bash
 set PADDLE_PDX_MODEL_SOURCE=BOS
@@ -118,10 +118,10 @@ C:\Users\username\.paddlex\official_models\
 
 ## 3. 参数配置
 
-配置块在 `topic_config.py:847-859`，初始化实参在 `techfin_ocr.py:117-123`：
+配置块在 `topic_config.py` 的 OCR 配置段，初始化实参在 `get_ocr()`：
 
 ```python
-# topic_config.py:847-859
+# topic_config.py 的 OCR 配置段
 OCR_ENABLED     = True
 OCR_LANG        = "ch"
 OCR_VERSION     = "PP-OCRv5"
@@ -134,7 +134,7 @@ OCR_PREFIX      = "ocr_"
 ```
 
 ```python
-# techfin_ocr.py:117-123
+# get_ocr() 的初始化实参
 _OCR = PaddleOCR(lang=cfg.OCR_LANG, ocr_version=cfg.OCR_VERSION,
                  device=cfg.OCR_DEVICE,
                  text_detection_model_name=cfg.OCR_DET_MODEL,
@@ -146,7 +146,7 @@ _OCR = PaddleOCR(lang=cfg.OCR_LANG, ocr_version=cfg.OCR_VERSION,
 
 | 参数              | 值                     | 值用法                                           | 修改后果                            |
 | --------------- | --------------------- | --------------------------------------------- | ------------------------------- |
-| `OCR_ENABLED`   | `True`                | 总开关。`techfin_ocr.py:367-369` 读到 `False` 会直接中止 | 设 `False` 可临时停用 ⑤ 而不改代码         |
+| `OCR_ENABLED`   | `True`                | 总开关。`techfin_ocr.py` 读到 `False` 会直接中止 | 设 `False` 可临时停用 OCR 而不改代码         |
 | `OCR_LANG`      | `"ch"`                | 语料全是中文政府公报/名单                                 | 改 `en` 会显著掉中文准确率                |
 | `OCR_VERSION`   | `"PP-OCRv5"`          | 当前最新一代，中文效果最好                                 | 换旧版（v4/v3）精度下降                  |
 | `OCR_DET_MODEL` | `PP-OCRv5_mobile_det` | **关键决策**，server 版 CPU 上慢到不可用                  | 改 server → 单页数十秒~分钟             |
@@ -181,28 +181,28 @@ _OCR = PaddleOCR(lang=cfg.OCR_LANG, ocr_version=cfg.OCR_VERSION,
 | 取文本     | `result[0][i][1][0]`    | 每页结果对象的 `rec_texts` 列表                              |
 | 取置信度    | `result[0][i][1][1]`    | 每页结果对象的 `rec_scores` 列表                             |
 
-对应的取结果代码在 `techfin_ocr.py:188-203`（`_extract_list(r, "rec_texts")` / `"rec_scores"`），并且 `_extract_list`（`:175-185`）做了**两种结果形态的兼容**（`{..'res':{key:..}}` 与扁平），以应对不同小版本的差异。
+对应的取结果代码在 `ocr_pages()`（取 `_extract_list(r, "rec_texts")` / `"rec_scores"`），并且 `_extract_list` 做了**两种结果形态的兼容**（`{..'res':{key:..}}` 与扁平），以应对不同小版本的差异。
 
 
 ---
 
 ## 4. 独立OCR 
 
-流水线里 OCR 是**单独一步 ⑤**，不是塞在 ② 抓取里顺手做的。原因写在 `techfin_ocr.py:8-9`：
+流水线里 OCR 是**单独一步（`fetch/techfin_ocr.py`）**，不是塞在 `fetch/techfin_fetch_body.py` 抓取里顺手做的。原因写在 `techfin_ocr.py` 的模块注释里：
 
-> ② 会跳过"已成功抓取"的条目（含已下载的扫描件），故补 OCR 必须在 ② 之外单独跑一遍。
+> `techfin_fetch_body.py` 会跳过"已成功抓取"的条目（含已下载的扫描件），故补 OCR 必须在 fetch 之外单独跑一遍。
 
-展开说：② 的幂等策略是"已完成的不重复做"。而扫描件在 ② 眼里"已成功下载"——于是**历史扫描件永远进不了 ② 的处理队列**，OCR 也就永远不会被执行。把 OCR 拆出来独立跑，它有自己的筛选条件（`is_scanned` + 未 `ocr_applied`，见 `techfin_ocr.py:226-238`）和自己的幂等标记，才能对着**存量缓存**批量补。
+展开说：`techfin_fetch_body.py` 的幂等策略是"已完成的不重复做"。而扫描件在它眼里"已成功下载"——于是**历史扫描件永远进不了抓取的处理队列**，OCR 也就永远不会被执行。把 OCR 拆出来独立跑，它有自己的筛选条件（`is_scanned` + 未 `ocr_applied`，见 `build_targets`）和自己的幂等标记，才能对着**存量缓存**批量补。
 
-**副产品**：② 因此不必依赖 paddle 这套重依赖，依赖面收窄，跑 ② 时不用等模型加载。
+**副产品**：`techfin_fetch_body.py` 因此不必依赖 paddle 这套重依赖，依赖面收窄，跑抓取时不用等模型加载。
 
-**注意流水线顺序**（编号是历史沿革，不是执行顺序. 平时使用直接看运行脚本）：
+**注意流水线顺序**（执行顺序以 `run_all.py` 的步骤表为准）：
 
 ```
-① 采集 → ② 抓取 → ⑤ OCR → ④ 清洗 → ③ 抽取
+TechFin-bug.py / techfin_authoritative.py 采集 → techfin_fetch_body.py 抓取 → techfin_ocr.py OCR → techfin_curate.py 清洗 → techfin_extract_points.py 抽取
 ```
 
-⑤ 在 ② 之后、④ 之前。OCR 结果写回 `body_cache/`（同名 `.txt` + 更新 JSON 字段，`techfin_ocr.py:266-275`），不是另存一份语料。因此下游 ③ 抽取走 `att.get("text_path")` 读附件 `.txt`（`extract/techfin_extract_points.py:341-357`）时自动吃到 OCR 文本，无需改 ③。④ 清洗本身不感知 OCR。
+`techfin_ocr.py` 在 `techfin_fetch_body.py` 之后、`techfin_curate.py` 之前。OCR 结果写回 `body_cache/`（同名 `.txt` + 更新 JSON 字段，见 `process_one`），不是另存一份语料。因此下游 `techfin_extract_points.py` 走 `att.get("text_path")` 读附件 `.txt` 时自动吃到 OCR 文本，无需改抽取脚本。`techfin_curate.py` 本身不感知 OCR。
 
 ---
 
@@ -220,8 +220,8 @@ _OCR = PaddleOCR(lang=cfg.OCR_LANG, ocr_version=cfg.OCR_VERSION,
 ### 5.2 四条降本手段
 
 1. **轻量模型**：mobile 版（§5.1）
-2. **只处理扫描件**：② 已把原生 PDF 抽好文本，⑤ 只碰 `is_scanned=True` 的（`techfin_ocr.py:233-234`）
-3. **幂等只跑一次**：`ocr_applied=True` 标记，重跑自动跳过；`--refresh` 才强制重来（`:235-236`）
+2. **只处理扫描件**：`techfin_fetch_body.py` 已把原生 PDF 抽好文本，OCR 只碰 `is_scanned=True` 的（见 `build_targets`）
+3. **幂等只跑一次**：`ocr_applied=True` 标记，重跑自动跳过；`--refresh` 才强制重来（见 `build_targets`）
 4. **限页**：`OCR_MAX_PAGES=50`，`render_pdf_pages` 只渲染 `min(total, 50)` 页（`:149`）
 
 ### 5.3 有意**没有**做的优化
@@ -245,9 +245,9 @@ _OCR = PaddleOCR(lang=cfg.OCR_LANG, ocr_version=cfg.OCR_VERSION,
 | `... 'use_angle_cls'` 同类报错 | 同上 | 换 `use_textline_orientation=`（§3.2） |
 | `AttributeError: 'PaddleOCR' object has no attribute 'ocr'` | 3.x 已废弃 `.ocr()` | 用 `.predict()`（§3.2） |
 | 结果取出来是空的 / 结构对不上 | 还在按 2.x 的嵌套下标取 | 改取 `rec_texts` / `rec_scores`（§3.2） |
-| 扫描件附件一直没有正文 | ⑤ 没跑，或该附件已被标记过 | 跑 `python fetch/techfin_ocr.py`；必要时加 `--refresh` |
+| 扫描件附件一直没有正文 | OCR 没跑，或该附件已被标记过 | 跑 `python fetch/techfin_ocr.py`；必要时加 `--refresh` |
 | 打印"无法导入 paddleocr" | 缺包，或模型没下载 | 见 §1（装包）与 §2（下模型） |
-| 打印"`OCR_ENABLED=False`，未启用 OCR" | 总开关被关了 | 改 `topic_config.py:849` |
+| 打印"`OCR_ENABLED=False`，未启用 OCR" | 总开关被关了 | 改 `topic_config.py` 的 `OCR_ENABLED` |
 | 一轮跑完但某个附件 `status` 非 ok | PDF 打开/渲染失败，或缺 `pypdfium2`/`numpy` | 看 `ocr_index.csv` 的 `status` 列与 `ocr_log` 输出 |
 | 换机器后所有附件都"重新下载模型" | `~/.paddlex/` 没跟过来 | 见 §7 |
 | 自检脚本报 `pypdfium2 has no attribute '__version__'` | `pypdfium2` 不暴露该属性 | 用 `importlib.metadata.version("pypdfium2")`（§7） |

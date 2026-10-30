@@ -32,7 +32,7 @@ __pycache__/
 #   !A/A1/data/*.jsonl
 A/A1/data/
 
-# ⑦ 入库报告根：与流水线数据分离，按运行目录增长，默认不跟踪。
+# 入库报告根（load/techfin_load_to_db.py）：与流水线数据分离，按运行目录增长，默认不跟踪。
 A/A1/reports/db_load/
 
 # 旧产物根：只读保留，不跟踪。

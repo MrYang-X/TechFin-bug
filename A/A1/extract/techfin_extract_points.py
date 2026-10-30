@@ -1,7 +1,7 @@
 """
-科技金融指数研究 · ③ 结构化数值抽取（三段流水线的第三段）
+科技金融指数研究 · 结构化数值抽取（techfin_extract_points.py）
 
-职责：读取 ② 落下的正文缓存 body_cache/（**纯读，不再发网络请求**），从正文与附件文本里
+职责：读取 techfin_fetch_body.py 落下的正文缓存 body_cache/（**纯读，不再发网络请求**），从正文与附件文本里
 抽出 A101「高新技术企业数量/密度」的**数据点**，落成"数据点级"CSV：
   - 证据级累积总库 techfin_a101_points.csv（一行 = 一个数据点，含原文证据片段）
   - 本轮聚合级 points_resolved.csv（一行 = 一个 地区×年份×指标 格，可直接映射 SQL 事实表）
@@ -12,7 +12,7 @@
   合并后按 point_id 去重；context_type 为 planned/target/decline 的数据点**照样入库**（标记而非丢弃），
   聚合层默认只取 actual 作为主值。
 
-与②的解耦：改规则只动 extract_config.py、重跑本脚本即可，**不必重抓网页**。
+与 techfin_fetch_body.py 的解耦：改规则只动 extract_config.py、重跑本脚本即可，**不必重抓网页**。
 
 用法：
   python techfin_extract_points.py --extractor rule     # 只跑规则层（零 LLM 成本）
@@ -767,7 +767,7 @@ def merge_points(rule_pts, llm_pts, llm_ran):
 # ==================== 聚合层 ====================
 
 def _quality_of(chosen):
-    """data_quality：优先用 ④ 清洗给出的 quality_grade；无则按 authority 回退（官方→2/媒体→3）。"""
+    """data_quality：优先用 techfin_curate.py 给出的 quality_grade；无则按 authority 回退（官方→2/媒体→3）。"""
     q = str(chosen.get("quality_grade", "") or "").strip()
     if q in ("1", "2", "3", "4"):
         return q
@@ -878,8 +878,8 @@ def load_cached_articles(cache_dir):
 
 
 def load_curated(out_root):
-    """读 ④ 清洗清单 curated_corpus.csv → {article_id: {quality_grade, level3_code, region_*}}。
-    文件不存在返回 {}（③ 行为完全不变——④ 是"提纯器"不是"必经关卡"）。"""
+    """读 techfin_curate.py 的清洗清单 curated_corpus.csv → {article_id: {quality_grade, level3_code, region_*}}。
+    文件不存在返回 {}（抽取行为完全不变——清洗脚本是"提纯器"不是"必经关卡"）。"""
     path = Path(out_root) / cfg.CURATED_ACCUMULATOR
     if not path.exists():
         return {}
@@ -900,7 +900,7 @@ def load_curated(out_root):
 
 
 def apply_curated_filter(articles, out_root):
-    """有清洗清单时：只保留提纯通过的文章，并把 ④ 字段回填进 meta（补官方缺列）。"""
+    """有清洗清单时：只保留提纯通过的文章，并把 techfin_curate.py 的字段回填进 meta（补官方缺列）。"""
     curated = load_curated(out_root)
     if not curated:
         return articles
@@ -908,7 +908,7 @@ def apply_curated_filter(articles, out_root):
     for a in articles:
         c = curated.get(str(a.get("article_id", "") or ""))
         if not c:
-            continue                      # 未通过 ④ 提纯 → 不抽
+            continue                      # 未通过 techfin_curate.py 提纯 → 不抽
         meta = a.setdefault("meta", {})
         for k, v in c.items():
             if v:
@@ -956,7 +956,7 @@ def merge_accumulator(delta, path):
 def write_extraction_report(path, stats, extractor, llm_degraded, llm_fatal):
     """写 extraction_report.md：LLM 尝试/成功/失败、token、成本、是否降级。"""
     lines = [
-        "# ③ 数值抽取报告",
+        "# 数值抽取报告",
         "",
         f"- 抽取模式：`{extractor}`",
         f"- 文章数：{stats['articles']}",
@@ -980,7 +980,7 @@ def write_extraction_report(path, stats, extractor, llm_degraded, llm_fatal):
 def run_once(run_dir, paths, cache_dir, out_root, extractor="hybrid", limit=None,
              allow_rule_fallback=False, max_llm_failure_rate=ec.LLM_MAX_FAILURE_RATE):
     print("=" * 60)
-    print(f"{cfg.TOPIC_LABEL} · ③ 数值数据点抽取（A101，{extractor}）")
+    print(f"{cfg.TOPIC_LABEL} · 数值数据点抽取（A101，{extractor}）")
     print("=" * 60)
 
     articles = apply_curated_filter(load_cached_articles(cache_dir), out_root)
@@ -1120,7 +1120,7 @@ def artifact_paths(run_dir):
 
 def parse_args(argv=None):
     ap = argparse.ArgumentParser(
-        description=f"{cfg.TOPIC_LABEL} · ③ 数值数据点抽取（A101）")
+        description=f"{cfg.TOPIC_LABEL} · 数值数据点抽取（A101）")
     ap.add_argument("--output-dir", help="数据根目录（覆盖 topic_config.DATA_ROOT）")
     ap.add_argument("--extractor", choices=["rule", "hybrid"], default="hybrid",
                     help="rule=只跑规则层（零 LLM 成本）；hybrid=规则+LLM 兜底（默认）")

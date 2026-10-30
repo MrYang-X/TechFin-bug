@@ -1,18 +1,18 @@
 """
-科技金融指数研究 · ⑤ OCR 补全（扫描件附件）
+科技金融指数研究 · OCR 补全（techfin_ocr.py，扫描件附件）
 
-职责：读 ② 的正文缓存 body_cache/，把【被判为扫描件（is_scanned=True）的 PDF 附件】
+职责：读 techfin_fetch_body.py 的正文缓存 body_cache/，把【被判为扫描件（is_scanned=True）的 PDF 附件】
 用**本地 PaddleOCR**（PP-OCRv5）补出文本，写回缓存（同名 .txt + 更新 JSON 字段）。
 **纯本地、不发任何网络请求**；**不 import 任何业务脚本**（只读 crawler_common / topic_config）。
 
-为什么独立成 pass：② 会跳过"已成功抓取"的条目（含已下载的扫描件），故补 OCR 必须在
-② 之外单独跑一遍；② 也因此不必依赖 paddle。
+为什么独立成 pass：techfin_fetch_body.py 会跳过"已成功抓取"的条目（含已下载的扫描件），故补 OCR 必须在
+fetch 之外单独跑一遍；techfin_fetch_body.py 也因此不必依赖 paddle。
 
-顺序：①采集 → ②抓取 → ⑤OCR → ④清洗 → ③抽取（写回缓存后，③ 读附件 .txt 会自动吃到 OCR 文本）。
+顺序：采集（TechFin-bug.py / techfin_authoritative.py）→ techfin_fetch_body.py → techfin_ocr.py → techfin_curate.py → techfin_extract_points.py（写回缓存后，抽取脚本读附件 .txt 会自动吃到 OCR 文本）。
 
 前置（一次性）：PaddleOCR 模型需先下载——
   set PADDLE_PDX_MODEL_SOURCE=BOS
-  python -c "from paddleocr import PaddleOCR; PaddleOCR(lang='ch', ocr_version='PP-OCRv5', device='cpu', use_doc_orientation_classify=False, use_doc_unwarping=False, use_textline_orientation=False)"
+  python -c "from paddleocr import PaddleOCR; PaddleOCR(lang='ch', ocr_version='PP-OCRv5', device='cpu', text_detection_model_name='PP-OCRv5_mobile_det', text_recognition_model_name='PP-OCRv5_mobile_rec', use_doc_orientation_classify=False, use_doc_unwarping=False, use_textline_orientation=False)"
 
 用法：
   python techfin_ocr.py                # 补全部待办的扫描件附件
@@ -307,7 +307,7 @@ def process_one(cache, aid, att_index, cache_dir=None):
 
 def run_once(run_dir, paths, cache_dir, refresh=False, limit=None):
     print("=" * 60)
-    print(f"{cfg.TOPIC_LABEL} · ⑤ OCR 补全（扫描件附件，{cfg.OCR_VERSION}）")
+    print(f"{cfg.TOPIC_LABEL} · OCR 补全（扫描件附件，{cfg.OCR_VERSION}）")
     print("=" * 60)
 
     cache = load_cache(cache_dir)
@@ -369,7 +369,7 @@ def artifact_paths(run_dir):
 
 def parse_args(argv=None):
     ap = argparse.ArgumentParser(
-        description=f"{cfg.TOPIC_LABEL} · ⑤ OCR 补全（扫描件附件）")
+        description=f"{cfg.TOPIC_LABEL} · OCR 补全（扫描件附件）")
     ap.add_argument("--output-dir", help="数据根目录（覆盖 topic_config.DATA_ROOT）")
     ap.add_argument("--refresh", action="store_true",
                     help="忽略 ocr_applied 标记，重新 OCR")

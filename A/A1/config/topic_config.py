@@ -35,7 +35,7 @@ CORE_TERMS = []
 QUALIFIER_TERMS = []
 
 # ==================== 地区口径：广东省县级区划 ====================
-# 来源：民政部《2024 年中华人民共和国县以上行政区划代码》，与 tech_finance_index.sql
+# 来源：民政部《2024 年中华人民共和国县以上行政区划代码》，与 db/10_schema.sql
 # 的 dim_region 表同源同码。爬虫不连数据库（产物是 CSV），故区划清单以常量形式放这里。
 #
 # 结构：{地级市名: [(县级区划代码, 名称), ...]}。东莞市/中山市是不设区的地级市，
@@ -212,13 +212,13 @@ REGION_QUERY_NAME_OVERRIDES = {
     "441502": "汕尾城区",
 }
 
-# ==================== 指标体系（与 tech_finance_index.sql 的 dim_index 同构） ====================
+# ==================== 指标体系（与 db/10_schema.sql 的 dim_index 同构） ====================
 # 字段名逐一对齐 dim_index 的列名（level1_code/level1_name/level1_weight、
 # level2_code/level2_name、level3_code/level3_name、unit），
 # 将来 CSV → SQL join 不用再改名。level2_code 取自下面的字典键（"A1"/"B2"…）。
 #
 # 权重（level1_weight/level2_weight/level3_weight）【不在这里维护】——爬虫不消费权重，
-# 放两份只会互相漂移。权重的唯一权威在 tech_finance_index.sql 的 dim_index 表。
+# 放两份只会互相漂移。权重的唯一权威在 db/10_schema.sql 的 dim_index 表。
 #
 # 指标的县域适用性（is_county_applicable）与替代口径（county_replacement）同样
 # 【只活在 DB 的 dim_index 里】。它们是研究设计元数据，对每条语料行都是噪声，
@@ -262,7 +262,7 @@ INDEX_KEYWORDS = {
                     # 以上前 3 条（QUERIES_PER_REGION）用于【带地区】采集；这里追加的词
                     # 排在后面，故【只在 --no-region 无地区采集时启用】，专门召回
                     # "新增高企 X 家""总数突破 X 家""存量 X 家"这类含具体数字的报道，
-                    # 供 techfin_extract_points.py 抽数据点。带地区口径保持不变（不重跑①）。
+                    # 供 techfin_extract_points.py 抽数据点。带地区口径保持不变（不重跑采集）。
                     "新增高新技术企业",
                     "高新技术企业 净增",
                     "高新技术企业 总数",
@@ -663,7 +663,7 @@ NOISE_DOMAINS = [
 ]
 NOISE_SOURCES = ["百度百科", "雪球", "东方财富"]
 # 非新闻文件类型：只挡可执行包/压缩包，**不再把 .pdf 一刀切当噪声**。
-# 政策文件、统计公报、名单公示大量是 PDF，② 已支持 PDF 正文/附件解析；
+# 政策文件、统计公报、名单公示大量是 PDF，techfin_fetch_body.py 已支持 PDF 正文/附件解析；
 # 旧规则会把最有价值的官方 PDF 直接丢掉。
 NOISE_URL_SUFFIXES = [".exe", ".zip", ".rar", ".7z"]
 
@@ -791,12 +791,12 @@ SOURCES = [
 # 可用命令行 --output-dir 临时覆盖。
 # 目录分离说明：
 #   - data/           流水线数据根：采集累积库、正文缓存、各阶段运行目录、评估；
-#   - reports/db_load/ ⑦ 入库报告根：load_log/load_report.md/load_errors.csv/load_manifest.json；
+#   - reports/db_load/ 入库报告根（techfin_load_to_db.py）：load_log/load_report.md/load_errors.csv/load_manifest.json；
 #   - techfin_common_output/ 旧产物根：只读保留，新流水线不再写入。
 DATA_ROOT = "data"
 # 向后兼容别名：旧脚本/旧命令仍可用 cfg.OUTPUT_ROOT。
 OUTPUT_ROOT = DATA_ROOT
-# ⑦ CSV → MySQL 入库报告根（相对本主题目录，独立于流水线运行目录序号）。
+# CSV → MySQL 入库报告根（techfin_load_to_db.py；相对本主题目录，独立于流水线运行目录序号）。
 LOAD_REPORT_ROOT = "reports/db_load"
 # 旧产物根：仅用于启动提示与 --input-dir 兼容，不在代码中写入。
 LEGACY_OUTPUT_ROOT = "techfin_common_output"
@@ -834,22 +834,22 @@ ACCUMULATOR_FILES = {
 }
 
 
-# ==================== 正文抓取 / 数值抽取 产物契约（②③）====================
-# "三段解耦流水线"的②（techfin_fetch_body.py）与③（techfin_extract_points.py）常量。
-# ②③ 与①（TechFin-bug.py）一样只通过文件耦合、互不 import。
+# ==================== 正文抓取 / 数值抽取 产物契约（techfin_fetch_body.py / techfin_extract_points.py）====================
+# techfin_fetch_body.py 与 techfin_extract_points.py 的常量。
+# 这些脚本与采集脚本一样只通过文件耦合、互不 import。
 
-# ---- ② 正文缓存（放输出根内、不放运行目录：跨轮复用，是"抽取规则迭代时不重抓网页"的核心）----
+# ---- techfin_fetch_body.py 正文缓存（放输出根内、不放运行目录：跨轮复用，是"抽取规则迭代时不重抓网页"的核心）----
 BODY_CACHE_DIR = "body_cache"          # 缓存根：正文 JSON/TXT + 附件二进制
-BODY_PROGRESS = "body_progress.csv"    # ② 断点续跑台账（source="body", plan_key=<article_id>）
-BODY_PREFIX = "body_"                  # ② 每轮产物前缀（body_log / body_index.csv ...）
+BODY_PROGRESS = "body_progress.csv"    # techfin_fetch_body.py 断点续跑台账（source="body", plan_key=<article_id>）
+BODY_PREFIX = "body_"                  # techfin_fetch_body.py 每轮产物前缀（body_log / body_index.csv ...）
 
-# ---- ③ 数值数据点产物 ----
+# ---- techfin_extract_points.py 数值数据点产物 ----
 POINTS_ACCUMULATOR = "techfin_a101_points.csv"  # 证据级数据点累积总库（跨轮读写）
-POINTS_PREFIX = "points_"                       # ③ 每轮产物前缀（points_log / points_delta.csv ...）
-LLM_CACHE_DIR = "a101_llm_cache"                # LLM 结果缓存（key=article_id+prompt_version+model）
+POINTS_PREFIX = "points_"                       # techfin_extract_points.py 每轮产物前缀（points_log / points_delta.csv ...）
+LLM_CACHE_DIR = "a101_llm_cache"                # LLM 结果缓存（key=article_id+prompt_version+model+md5(正文路径)）
 LLM_CALLS_LOG = "a101_llm_calls.jsonl"          # LLM 调用审计（逐次追加）
 
-# ---- ② 二级抓取的节奏与范围 ----
+# ---- techfin_fetch_body.py 二级抓取的节奏与范围 ----
 HOST_MIN_INTERVAL = 3.0        # 同一主机两次请求的最小间隔（秒），按 host 礼貌限速
 ATTACHMENT_EXTS = (".pdf", ".doc", ".docx", ".xls", ".xlsx", ".wps", ".et")
 MAX_ATTACHMENTS_PER_PAGE = 10  # 单页最多下载的附件数（防个别页面挂几十个附件）
@@ -858,14 +858,14 @@ ROBOTS_ENFORCE = True          # 是否遵守 robots.txt
 BODY_MAX_BYTES = 20 * 1024 * 1024  # 单文件下载上限（防超大附件拖垮）
 
 
-# ---- ④ 语料清洗/提纯产物契约 ----
+# ---- techfin_curate.py 语料清洗/提纯产物契约 ----
 CURATED_ACCUMULATOR = "curated_corpus.csv"    # 文章级干净语料（跨轮覆盖式重构，幂等）
-CURATED_UNCERTAIN = "curated_uncertain.csv"   # 官方"泛化标题"待正文确认队列（供②补抓）
+CURATED_UNCERTAIN = "curated_uncertain.csv"   # 官方"泛化标题"待正文确认队列（供 techfin_fetch_body.py --from-curated 补抓）
 CURATED_DROPPED = "curated_dropped.csv"       # 被剔除条目（含原因，便于复核）
-CURATED_PREFIX = "curated_"                   # ④ 每轮产物前缀（curated_log / curated_report.md ...）
+CURATED_PREFIX = "curated_"                   # techfin_curate.py 每轮产物前缀（curated_log / curated_report.md ...）
 
 
-# ---- ⑤ OCR 补全（扫描件附件）契约与参数 ----
+# ---- techfin_ocr.py OCR 补全（扫描件附件）契约与参数 ----
 # techfin_ocr.py 读 body_cache、给扫描件 PDF 补 OCR 并写回缓存。纯本地、不发网络请求。
 OCR_ENABLED = True
 OCR_LANG = "ch"                # PaddleOCR 语言/模型族
@@ -877,7 +877,7 @@ OCR_REC_MODEL = "PP-OCRv5_mobile_rec"
 OCR_DEVICE = "cpu"             # 本机无 CUDA；有 GPU 可改 "gpu"
 OCR_DPI = 200                  # PDF 渲染分辨率（越大越准越慢）
 OCR_MAX_PAGES = 50             # 单个附件最多 OCR 的页数（防超大件拖垮）
-OCR_PREFIX = "ocr_"            # ⑤ 每轮产物前缀（ocr_log / ocr_index.csv）
+OCR_PREFIX = "ocr_"            # techfin_ocr.py 每轮产物前缀（ocr_log / ocr_index.csv）
 
 
 # 印证报告文件名
