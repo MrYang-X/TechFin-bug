@@ -147,6 +147,21 @@ def test_loader_helpers() -> None:
         {"measure_code": "count"}, "actual", ctx=ctx,
     )
     check("missing 记录年份正确", rec["year"] == 2023, str(rec["year"]))
+    rec_float = loader.build_missing_record(
+        {"region_code": "440103", "stat_year": "2025.0", "level3_code": "A101",
+         "n_sources": "1", "agreement": "True", "stat_year_src": "text"},
+        {"measure_code": "count"}, "actual", ctx=ctx,
+    )
+    check("浮点年份落库为整数", rec_float["year"] == 2025, str(rec_float["year"]))
+    point = {"level3_code": "A101", "region_code": "440103", "stat_year": "2025.0",
+             "metric": "count", "value_num": "100", "value_text": "100家",
+             "unit": "家", "context_type": "actual", "article_id": "a1",
+             "authority": "官方", "confidence": "0.9", "publish_date": "2025-06-01"}
+    matched, match_err = loader.match_evidence(
+        {"region_code": "440103", "level3_code": "A101", "stat_year": "2025",
+         "metric": "count", "canonical_value": "100", "source_article_ids": "a1"},
+        {"a1": [point]}, "actual")
+    check("年份新旧格式可匹配", matched is not None, match_err)
 
 
 def test_loader_gates() -> None:
@@ -191,12 +206,37 @@ def test_loader_gates() -> None:
         return [i.code for i in issues]
 
     check("空年份不崩溃", codes(row(stat_year=""), dims(), args()) == ["YEAR_INVALID"])
+    check("浮点年份不崩溃", codes(row(stat_year="2025.0"), dims(), args())
+          == ["EMPTY_VALUE_MISSING"])
     check("retired 指标被拒", codes(row(canonical_value="100"), dims("retired"), args()) == ["INDEX_INACTIVE"])
     check("missing 不绕过 non-actual",
           codes(row(chosen_reason="→ planned"), dims(), args()) == ["NON_ACTUAL_CONTEXT"])
     check("显式 non-actual 才写 missing",
           codes(row(chosen_reason="→ planned"), dims(), args(include_non_actual=True))
           == ["EMPTY_VALUE_MISSING"])
+
+
+def test_stat_year_normalization() -> None:
+    print("[7] stat_year 落盘格式归一化")
+    check("None → 空串", ep._normalize_year(None) == "", str(ep._normalize_year(None)))
+    check("float → int", ep._normalize_year(2025.0) == 2025, str(ep._normalize_year(2025.0)))
+    check("字符串浮点 → int", ep._normalize_year("2025.0") == 2025,
+          str(ep._normalize_year("2025.0")))
+
+    base = {
+        "region_code": "440103", "region_name": "荔湾区", "city_name": "广州市",
+        "region_from": "text", "region_confidence": "0.9", "region_evidence": "荔湾",
+        "level3_code": "A101", "level3_name": "高新技术企业数量/密度",
+        "metric": "count", "stat_year_src": "text", "year_confidence": "0.9",
+        "year_evidence": "2025年", "aggregation_type": "total",
+        "value_num": "100", "context_type": "actual", "authority": "官方",
+        "confidence": "0.9", "publish_date": "2025-06-01", "article_id": "a1",
+    }
+    points = [dict(base, stat_year=2025), dict(base, stat_year=None, article_id="a2")]
+    out = ep.resolve_points(points)
+    years = out["stat_year"].tolist()
+    check("resolved 年份无浮点格式",
+          all(v == "" or isinstance(v, int) for v in years), str(years))
 
 
 def main() -> int:
@@ -206,6 +246,7 @@ def main() -> int:
     test_relevance_and_title()
     test_loader_helpers()
     test_loader_gates()
+    test_stat_year_normalization()
     print("\n" + "=" * 50)
     if FAILS:
         print(f"[失败] {len(FAILS)} 项：{FAILS}")

@@ -462,7 +462,8 @@ def run_loader(argv: list[str], env_overrides: dict[str, str], kind: str = "run"
         if rc == 0:
             print("[提示] 报告与错误文件的路径见上方 loader 的 [报告] / [错误] 行。")
         elif rc == 1:
-            print("[提示] 存在 hard 拒绝或 DB 错误；请查看 load_errors.csv。")
+            print("[提示] 退出码 1：可能是 hard 拒绝/DB 错误（见 load_errors.csv），"
+                  "也可能是 loader 未捕获异常（见上方 traceback）。")
         elif rc == 2:
             print("[提示] 输入/连接/维度错误；请检查路径与数据库配置。")
     return rc

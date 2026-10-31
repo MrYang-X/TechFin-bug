@@ -984,7 +984,8 @@ def match_evidence(
     ids = split_ids(s(row, "source_article_ids"))
     level3 = s(row, "level3_code")
     region_code = s(row, "region_code")
-    year = s(row, "stat_year")
+    # 年份按数值比较：上游可能写 "2025"，旧累积库可能仍是 "2025.0"
+    year = parse_int(s(row, "stat_year"))
     metric = s(row, "metric")
     value = parse_float(s(row, "canonical_value"))
 
@@ -996,7 +997,7 @@ def match_evidence(
                     continue
                 if s(point, "region_code") != region_code:
                     continue
-                if year and s(point, "stat_year") != year:
+                if year is not None and parse_int(s(point, "stat_year")) != year:
                     continue
                 if metric and not relax_metric and s(point, "metric") != metric:
                     continue
@@ -1129,6 +1130,7 @@ def build_present_record(
     dims: Dims,
     assumed_unit: bool,
     partial_batch: bool,
+    year: int | None = None,
     ctx: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     authority = s(row, "authority") or s(point, "authority")
@@ -1161,7 +1163,7 @@ def build_present_record(
     return {
         "_row_no": 0,
         "region_code": s(row, "region_code"),
-        "year": int(s(row, "stat_year")),
+        "year": year if year is not None else parse_int(s(row, "stat_year")),
         "level3_code": s(row, "level3_code"),
         "measure_code": measure["measure_code"],
         "context_type": context,
@@ -1192,11 +1194,12 @@ def build_missing_record(
     measure: dict[str, Any],
     context: str,
     ctx: dict[str, Any] | None = None,
+    year: int | None = None,
 ) -> dict[str, Any]:
     ids = split_ids(s(row, "source_article_ids"))
     return {
         "region_code": s(row, "region_code"),
-        "year": int(s(row, "stat_year")),
+        "year": year if year is not None else parse_int(s(row, "stat_year")),
         "level3_code": s(row, "level3_code"),
         "measure_code": measure["measure_code"],
         "context_type": context,
@@ -1315,7 +1318,7 @@ def evaluate_row(row: Any, ctx: dict[str, Any]) -> tuple[dict[str, Any] | None, 
     # 6) 空值
     if not canonical:
         if args.include_missing:
-            record = build_missing_record(row, measure, context, ctx=ctx)
+            record = build_missing_record(row, measure, context, ctx=ctx, year=year_value)
             issues.append(make_issue(ctx, "warn", "soft", "EMPTY_VALUE_MISSING", "主值为空，按 --include-missing 写入 missing"))
             return record, issues
         issues.append(make_issue(
@@ -1519,7 +1522,7 @@ def evaluate_row(row: Any, ctx: dict[str, Any]) -> tuple[dict[str, Any] | None, 
     curated = ctx["curated"].get(s(point, "article_id"), {}) or ctx["curated"].get(split_ids(s(row, "source_article_ids"))[0] if split_ids(s(row, "source_article_ids")) else "", {})
     record = build_present_record(
         row, point, measure, parsed, actual_unit, context, verified,
-        curated, dims, assumed_unit, partial_batch, ctx=ctx,
+        curated, dims, assumed_unit, partial_batch, year=year, ctx=ctx,
     )
 
     # 一致性警告
@@ -1974,8 +1977,11 @@ def _run_once(args: argparse.Namespace, state: dict[str, Any]) -> int:
                 duplicate_conflicts = 0
                 for _, row in data.iterrows():
                     context, _ = parse_chosen_context(s(row, "chosen_reason"))
-                    key = (s(row, "region_code"), s(row, "stat_year"), s(row, "level3_code"),
-                           s(row, "metric"), context)
+                    # 年份按数值归一，避免 "2025" 与 "2025.0" 被当成不同格
+                    year_key = parse_int(s(row, "stat_year"))
+                    key = (s(row, "region_code"),
+                           year_key if year_key is not None else s(row, "stat_year"),
+                           s(row, "level3_code"), s(row, "metric"), context)
                     old = best.get(key)
                     if old is None:
                         best[key] = row
@@ -2005,7 +2011,16 @@ def _run_once(args: argparse.Namespace, state: dict[str, Any]) -> int:
                     "curated": curated,
                     "load_stats": stats,
                 }
-                record, row_issues = evaluate_row(row, ctx)
+                try:
+                    record, row_issues = evaluate_row(row, ctx)
+                except Exception as exc:
+                    # 单行格式/解析异常隔离为 hard 拒绝，避免整批入库中断
+                    record = None
+                    row_issues = [make_issue(
+                        ctx, "reject", "hard", "ROW_EXCEPTION",
+                        f"行处理异常 {type(exc).__name__}: {exc}",
+                        "已隔离该行；请检查原始 CSV 字段格式。",
+                    )]
                 issues.extend(row_issues)
                 reject = any(i.action == "reject" for i in row_issues)
                 skip = any(i.action == "skip" for i in row_issues)

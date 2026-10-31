@@ -774,12 +774,33 @@ def _quality_of(chosen):
     return "2" if chosen.get("authority") == "官方" else "3"
 
 
+def _normalize_year(value):
+    """stat_year 落盘归一化：None/NaN/空 → ""，数字 → int，异常值原样保留供审计。
+
+    不能依赖 pandas 自动推断：列中只要有 None，整列会被升为 float64，
+    年份就会写成 "2025.0"，下游 loader 与旧数据比对时容易误判。
+    """
+    if value is None:
+        return ""
+    try:
+        if pd.isna(value):
+            return ""
+    except (TypeError, ValueError):
+        pass
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return value
+
+
 def resolve_points(points):
     """把证据级数据点归一到 (region_code, level3_code, stat_year, metric) 一格一行。"""
     rows = []
     df = pd.DataFrame(points)
     if df.empty:
         return pd.DataFrame(columns=ec.RESOLVED_COLS)
+    if "stat_year" in df.columns:
+        df["stat_year"] = df["stat_year"].map(_normalize_year)
     df["_val"] = pd.to_numeric(df["value_num"], errors="coerce")
     if "aggregation_type" in df.columns:
         df["_agg"] = df["aggregation_type"].replace("", "total").fillna("total")
@@ -1080,6 +1101,10 @@ def run_once(run_dir, paths, cache_dir, out_root, extractor="hybrid", limit=None
 
     delta = pd.DataFrame(all_points)[ec.POINT_COLS]
     resolved = resolve_points(all_points)
+    # 落盘前统一 stat_year 类型，避免 None 触发行级 float 化（"2025.0"）
+    delta["stat_year"] = delta["stat_year"].map(_normalize_year)
+    if "stat_year" in resolved.columns:
+        resolved["stat_year"] = resolved["stat_year"].map(_normalize_year)
 
     delta.to_csv(paths["delta"], index=False, encoding="utf-8-sig")
     resolved.to_csv(paths["resolved"], index=False, encoding="utf-8-sig")
