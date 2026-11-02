@@ -71,6 +71,13 @@ DEFAULT_HOST = os.getenv("TECHFIN_DB_HOST", "127.0.0.1")
 DEFAULT_PORT = int(os.getenv("TECHFIN_DB_PORT", "3306"))
 DEFAULT_USER = os.getenv("TECHFIN_DB_USER", "root")
 
+try:
+    # noinspection PyUnresolvedReferences
+    import topic_config as _cfg  # noqa: E402
+    BLOCKABLE_LEVEL3 = list(getattr(_cfg, "BLOCKABLE_LEVEL3", ["A103"]) or [])
+except Exception:
+    BLOCKABLE_LEVEL3 = ["A103"]
+
 
 # ==================== 输入小工具（风格对齐 run_all.py）====================
 
@@ -315,12 +322,13 @@ def collect_filter_args() -> tuple[list[str], str]:
     if ask_yes_no("允许 doc/window 低置信年份（--allow-low-confidence-year）？", False):
         args.append("--allow-low-confidence-year")
         labels.append("低置信年份")
-    if ask_yes_no("放行 A103（--allow-level3 A103，默认阻断）？", False):
-        print("  [注意] 只有 share/%/actual/0—100 的合法 A103 才应放行。")
-        args += ["--allow-level3", "A103"]
-        labels.append("A103")
+    for code in BLOCKABLE_LEVEL3:
+        if ask_yes_no(f"放行 {code}（--allow-level3 {code}，默认阻断）？", False):
+            print(f"  [注意] 只有该指标的口径/单位/范围都合法的行才应放行。")
+            args += ["--allow-level3", code]
+            labels.append(code)
 
-    only = ask_optional("只处理指定三级指标（逗号分隔，如 A101,A102）")
+    only = ask_optional("只处理指定三级指标（逗号分隔，如 A201,A202,A203,A204）")
     if only:
         args += ["--only-level3", only]
         labels.append(f"only={only}")

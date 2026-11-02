@@ -167,7 +167,7 @@ def score(out_root):
         denom = c + w + p
         return ((c + 0.5 * p) / denom) if denom else None
 
-    lines = ["# A101 抽取评估报告\n", f"生成时间：{now_str()}\n",
+    lines = [f"# {cfg.TOPIC_LABEL} · 抽取评估报告\n", f"生成时间：{now_str()}\n",
              "## 1. 总览\n",
              f"- 抽样 {n_total} 条，已标注 {n_lab} 条（覆盖率 {n_lab / n_total * 100:.0f}%）"]
     overall = prec(lab[labeled])

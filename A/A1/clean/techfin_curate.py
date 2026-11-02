@@ -198,7 +198,7 @@ def _is_adjectival_gaoqi(text, pos):
 
 
 def build_indicator_families():
-    """{level3_code: {terms, level3_name, unit, level1/2_code/name}}，由 INDEX_KEYWORDS 派生。"""
+    """{level3_code: {terms, units, level3_name, unit, level1/2_code/name}}，由 INDEX_KEYWORDS 派生。"""
     fams = {}
     for l2, node in cfg.INDEX_KEYWORDS.items():
         for ind in node["indicators"]:
@@ -207,17 +207,23 @@ def build_indicator_families():
                 if " " not in q and len(q) <= 12 and q not in terms:
                     terms.append(q)
             fams[ind["level3_code"]] = {
-                "terms": terms, "level3_name": ind["level3_name"], "unit": ind["unit"],
+                "terms": terms, "units": set(), "level3_name": ind["level3_name"],
+                "unit": ind["unit"],
                 "level1_code": node["level1_code"], "level1_name": node["level1_name"],
                 "level2_code": l2, "level2_name": node["level2_name"],
             }
     try:
         # noinspection PyUnresolvedReferences
         import extract_config as ec
-        if "A101" in fams:
-            for t in ec.A101_TERMS:
-                if t not in fams["A101"]["terms"]:
-                    fams["A101"]["terms"].append(t)
+        # 把抽取契约里的无空格词族/单位并入清洗层，避免两处词表漂移。
+        for code, scope in ec.INDICATOR_SCOPE.items():
+            fam = fams.get(code)
+            if not fam:
+                continue
+            for t in scope.get("terms", ()):
+                if t not in fam["terms"]:
+                    fam["terms"].append(t)
+            fam["units"] = set(scope.get("units", ()))
     except Exception:
         pass
     return fams
@@ -248,15 +254,20 @@ def find_indicator_hits(text, fams):
     return hits
 
 
-_NUM_UNIT = re.compile(r"\d[\d,]*(?:\.\d+)?\s*(?:万余|万|余|多)?\s*(?:家|户|个|家/万人|家/万|家每万人)")
+def _num_unit_re(units):
+    """按单位集合动态构建"数字+单位"正则（用于数值型报道计数）。"""
+    unit_set = set(units) or {"家", "户", "个", "家/万人", "%", "亿元", "万元", "个/万人"}
+    alt = "|".join(re.escape(u) for u in sorted(unit_set, key=len, reverse=True))
+    return re.compile(rf"\d[\d,]*(?:\.\d+)?\s*(?:万余|万(?![元亿])|余|多)?\s*(?:{alt})")
 
 
 def count_number_statements(text, fams, window=60):
-    """统计"指标词邻近 window 字内有 数字+家/户/个"的语句数（判是否"数值型报道"）。"""
+    """统计"指标词邻近 window 字内有 数字+该指标允许单位"的语句数（判是否"数值型报道"）。"""
     if not text:
         return 0
-    positions = []
+    positions = []          # [(位置, 该指标允许的单位集合)]
     for code, fam in fams.items():
+        units = set(fam.get("units") or ())
         for term in fam["terms"]:
             s = 0
             while True:
@@ -264,12 +275,23 @@ def count_number_statements(text, fams, window=60):
                 if i < 0:
                     break
                 if term != "高企" or not _is_adjectival_gaoqi(text, i):
-                    positions.append(i)
+                    positions.append((i, units))
                 s = i + 1
     if not positions:
         return 0
-    return sum(1 for m in _NUM_UNIT.finditer(text)
-               if any(abs(m.start() - p) <= window for p in positions))
+    all_units = set().union(*(u for _, u in positions))
+    pattern = _num_unit_re(all_units)
+    total = 0
+    for m in pattern.finditer(text):
+        # 提取数字后的单位（正则末尾的单位组没有命名，按已知单位最长后缀匹配）
+        matched = next((u for u in sorted(all_units, key=len, reverse=True)
+                        if m.group(0).endswith(u)), "")
+        if not matched:
+            continue
+        if any(abs(m.start() - p) <= window and (not units or matched in units)
+               for p, units in positions):
+            total += 1
+    return total
 
 
 # ==================== 相关性打分 ====================

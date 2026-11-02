@@ -228,11 +228,26 @@ def year_of(value):
 # 政策文件名：《...》
 _DOC_RE = re.compile(r"《([^》]{4,60})》")
 
-# 覆盖度对比用的主题词。注意官方源极少用"科技金融"字面词来命名
-# （实测 84 条搜索语料里"科技金融"命中 76 次，而 600 条官方标题里只有 4 次），
-# 故对比时除字面词外还列了几个官方口径常用的近义表述。
-TOPIC_TERMS = ["科技金融", "金融科技", "科创", "科技型中小企业", "科技成果转化",
-               "高新技术企业", "研发经费", "研发投入", "R&D"]
+# 覆盖度对比用的主题词。由 INDEX_KEYWORDS 的各指标前 3 条检索式派生 + 主题补充词，
+# 换主题/换检索词自动跟随，不再为 A2/A3 单独手写一份。
+_TOPIC_TERMS_BASE = ["科技金融", "金融科技", "科创"]
+
+
+def _derive_topic_terms():
+    terms = list(_TOPIC_TERMS_BASE)
+    for t in getattr(cfg, "AUTH_EXTRA_TERMS", ()):
+        if t not in terms:
+            terms.append(t)
+    for node in cfg.INDEX_KEYWORDS.values():
+        for ind in node["indicators"]:
+            for q in ind["queries"][:getattr(cfg, "QUERIES_PER_REGION", 3)]:
+                for tok in q.split():
+                    if len(tok) >= 2 and tok not in terms:
+                        terms.append(tok)
+    return terms
+
+
+TOPIC_TERMS = _derive_topic_terms()
 
 
 def doc_names(df):

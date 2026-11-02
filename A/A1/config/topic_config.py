@@ -11,6 +11,14 @@
 
 TOPIC_LABEL = "科技金融指数研究"
 
+# 命令行默认采集的二级指标（采集器 --level2 的默认值；复制到其他主题后改这里即可）。
+DEFAULT_LEVEL2 = ["A1"]
+
+# 入库默认阻断的指标（防御性策略；A2/A3 正常不会产出 A103，但可防止误指向 A1 数据根）。
+BLOCK_LEVEL3 = "A103"
+# 交互式入库菜单里允许"放行"的阻断指标（空表示不提供该菜单）。
+BLOCKABLE_LEVEL3 = ["A103"]
+
 # ==================== 官方源打标词 ====================
 #
 # 【搜索引擎的检索词不在这里！】它们由下方 INDEX_KEYWORDS 的三级指标 queries 逐条
@@ -939,8 +947,12 @@ def _make_plan(node, l2, ind, query, region_code, region_name, city_name,
         "region_code": region_code,
         "region_name": region_name,
         "city_name": city_name,
+        # county=带地区前缀（县级单元）；normal=无地区。供 --list-plan 与报告核对。
+        "query_scope": "county" if region_code else "normal",
+        # 该指标是否使用了县域替代口径（county_queries）。
+        "county_replacement": bool(ind.get("county_queries")),
         # 带地区时为 ()（地区词已是强约束，见 ANCHOR_TERMS 上方实测说明）；
-        # 不带地区时用主题锚点，防止"高新技术企业"泛化到全国无关报道。
+        # 不带地区时用主题/指标锚点，防止"高新技术企业"泛化到全国无关报道。
         "anchor_terms": anchor_terms,
         # 地区别名（规范名 / 市名），供松散源（LOOSE_SOURCES）做"必需地区词"补偿过滤；
         # 无地区检索式时为空元组，required_terms 自动失效。
@@ -974,7 +986,9 @@ def build_search_plan(level2_codes=None, regions=None, queries_per_region=None,
         if level2_codes and l2 not in level2_codes:
             continue
         for ind in node["indicators"]:
-            queries = ind["queries"]
+            # 带地区时优先用县域替代口径（如 A202/A203 的 county_queries）；
+            # 无地区时保留完整原口径 queries（含数值型尾巴）。
+            queries = (ind.get("county_queries") or ind["queries"]) if regions else ind["queries"]
             if regions:
                 queries = queries[:queries_per_region]
             for q in queries:
@@ -988,7 +1002,7 @@ def build_search_plan(level2_codes=None, regions=None, queries_per_region=None,
                                         city, ()))
     else:
         for l2, node, ind, q in base:
-            plans.append(_make_plan(node, l2, ind, q, "", "", "",
-                                    tuple(ANCHOR_TERMS)))
+            anchors = tuple(ind.get("anchor_terms", ANCHOR_TERMS))
+            plans.append(_make_plan(node, l2, ind, q, "", "", "", anchors))
 
     return plans[offset: None if limit is None else offset + limit]

@@ -45,6 +45,8 @@ sys.path.insert(0, str(_TOPIC_DIR / "config"))  # → topic_config / extract_con
 # noinspection PyUnresolvedReferences
 import topic_config as cfg      # noqa: E402
 # noinspection PyUnresolvedReferences
+import extract_config as ec     # noqa: E402
+# noinspection PyUnresolvedReferences
 from paths import finish_run_manifest, new_pipeline_run, pipeline_root  # noqa: E402
 from crawler_common import (    # noqa: E402
     run_logging,
@@ -111,7 +113,7 @@ def _gap_stats(out_root):
 def build_report(df, out_root, sample_n=20):
     lines = []
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    lines.append("# A101 数据点质量报告\n")
+    lines.append(f"# {cfg.TOPIC_LABEL} · 数据点质量报告\n")
     lines.append(f"生成时间：{now}\n")
 
     if df.empty:
@@ -150,8 +152,15 @@ def build_report(df, out_root, sample_n=20):
         n_break = int((df["aggregation_type"] == "breakdown").sum())
         lines.append(f"- 拆分口径 breakdown：{n_break}（保留证据，不参与主值）")
     if "level3_code" in df.columns and "metric" in df.columns:
-        bad = df[(df["level3_code"] == "A103") & (df["metric"] == "count")]
-        lines.append(f"- A103+count 错配：{len(bad)}（应为 0）")
+        # 通用指标-口径错配检查（替代原先的 A103+count 专项检查）。
+        def _mismatch(r):
+            scope = ec.INDICATOR_SCOPE.get(str(r.get("level3_code", "")))
+            return bool(scope) and str(r.get("metric", "")) not in scope.get("metrics", ())
+        bad = df.apply(_mismatch, axis=1)
+        lines.append(f"- 指标/口径错配：{int(bad.sum())}（应为 0）")
+        if "A103" in ec.INDICATOR_SCOPE:
+            bad103 = df[(df["level3_code"] == "A103") & (df["metric"] == "count")]
+            lines.append(f"- A103+count 错配：{len(bad103)}（应为 0）")
     lines.append("")
 
     lines.append("## 2b. 数据年份\n")

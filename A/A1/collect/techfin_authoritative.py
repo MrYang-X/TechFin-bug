@@ -97,14 +97,17 @@ _ROW_DATE_RE = re.compile(r"(20\d{2})[-年/.](\d{1,2})[-月/.](\d{1,2})")
 _MAX_ROW_TEXT = 150
 
 
-def parse_list_rows(html, base_url):
+def parse_list_rows(html, base_url, allow_no_date=False):
     """
     从官方列表页提取 [(title, date_raw, url)]。
 
     三个站的 HTML 结构差异很大（table / ul / div 混用），但共同点是：
     【标题链接与它的日期在同一个行容器内】。故用"取链接最近的祖先容器，
     在其中找日期"这一通用启发式，避免逐站写选择器——实测对
-    gdstc / most 等均能稳定命中。
+    gdstc / most / stats.gd / pbc 等均能稳定命中。
+
+    allow_no_date=True 时，行容器里没有日期的条目也保留（日期留空，
+    由清洗阶段的标题年份兜底），用于财政厅这类无日期列表。
     """
     soup = BeautifulSoup(html, "html.parser")
     rows = []
@@ -121,14 +124,14 @@ def parse_list_rows(html, base_url):
             continue
 
         m = _ROW_DATE_RE.search(text)
-        if not m:
+        if not m and not allow_no_date:
             continue
 
         url = urljoin(base_url, a.get("href", ""))
         if not url.startswith("http") or url in seen_urls:
             continue
         seen_urls.add(url)
-        rows.append((title, m.group(0), url))
+        rows.append((title, m.group(0) if m else "", url))
 
     return rows
 
@@ -136,7 +139,11 @@ def parse_list_rows(html, base_url):
 # ==================== 采集 ====================
 
 def page_urls(source, max_pages):
-    """按各站分页规律生成待抓页 URL 列表（第一页用 list_url，其余套模板）"""
+    """按各站分页规律生成待抓页 URL 列表（第一页用 list_url，其余套模板）。
+
+    source 可用 max_pages 覆盖全局翻页数（如只有首页、无分页规律的列表）。
+    """
+    max_pages = int(source.get("max_pages", max_pages) or max_pages)
     urls = [source["list_url"]]
     start = source.get("first_page_no", 1)
     for i in range(max_pages - 1):
@@ -199,11 +206,11 @@ def artifact_paths(run_dir):
 
 def run_once(run_dir, paths, accumulator, progress_path=None, fresh=False, limit_pages=None):
     print("=" * 60)
-    print("科技金融指数研究 · 官方政策源采集（用于交叉印证）")
+    print(f"{cfg.TOPIC_LABEL} · 官方政策源采集（用于交叉印证）")
     print("=" * 60)
     print(f"检索词：{'、'.join(cfg.AUTH_KEYWORDS)}")
     max_pages = int(limit_pages or cfg.MAX_PAGES_PER_SOURCE)
-    print(f"每源翻页：{max_pages} 页 | "
+    print(f"每源翻页：{max_pages} 页（源可单独覆盖） | "
           f"保存全部条目：{'是' if cfg.SAVE_ALL_ITEMS else '否（只存命中）'}")
     print(f"产物目录：{run_dir}")
 
@@ -223,10 +230,15 @@ def run_once(run_dir, paths, accumulator, progress_path=None, fresh=False, limit
 
     for source in cfg.SOURCES:
         label = source["label"]
+        if not source.get("enabled", True):
+            print(f"\n-- 来源：{label}（{source['name']}）[跳过] enabled=False")
+            continue
         print(f"\n-- 来源：{label}（{source['name']}）")
         stats["per_source"][label] = 0
+        src_cap = int(source.get("max_pages", max_pages))
+        src_pages = min(int(limit_pages), src_cap) if limit_pages else src_cap
 
-        for page_no, url in enumerate(page_urls(source, max_pages), 1):
+        for page_no, url in enumerate(page_urls(source, src_pages), 1):
             if (source["name"], url) in done:
                 print(f"    第 {page_no} 页 [跳过] 台账已成功")
                 continue
@@ -238,7 +250,8 @@ def run_once(run_dir, paths, accumulator, progress_path=None, fresh=False, limit
                 print(f"    第 {page_no} 页 [中断] 采集失败，该源停止翻页")
                 break
 
-            rows = parse_list_rows(resp.text, url)
+            rows = parse_list_rows(resp.text, url,
+                                   allow_no_date=source.get("allow_no_date", False))
             if not rows:
                 print(f"    第 {page_no} 页 [停止] 未解析出条目（可能改版）")
                 break

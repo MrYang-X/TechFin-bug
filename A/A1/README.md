@@ -376,11 +376,11 @@ A/A1/
 - **可追溯**：`--save-html` 额外保存 `body_cache/raw_html/<aid>.html.gz`，便于换抽取器后重放；
   附件同时记录绝对路径与相对路径（`path_rel/text_rel`），换数据根后仍可定位。
 
-**`extract/techfin_extract_points.py` —— 抽 A101 数值数据点。** 读 `body_cache/`（**纯读，不发请求**）：
+**`extract/techfin_extract_points.py` —— 抽已启用指标的数值数据点。** 读 `body_cache/`（**纯读，不发请求**）：
 - **规则层**（零成本）正则匹配"XX 区新增高新技术企业 123 家"等；**LLM 层**（Claude Sonnet 5.5，
   结构化输出）在提到指标时兜底，专门区分 `actual`（实际/累计/现有）与 `planned/target`（拟/计划/目标）。
 - **有 LLM 结果时以 LLM 为准**（规则层在真实政府文本上假阳性较多，仅作交叉印证与离线回退）。
-- **A103 错标根治**：规则层只产 `A101`，不再继承文章级 `level3_code`；再做指标-口径-单位一致性校验，
+- **指标错标根治**：规则层按 `extract_config.INDICATOR_SCOPE` 产已启用指标（A1 当前为 A101），不继承文章级 `level3_code`；再做指标-口径-单位一致性校验，
   不合格点写入 `<运行目录>/points_dropped.csv`，不静默。
 - **地区按数字锚点判定**：取数字前 20/后 10 字窗口；`全市` 映射到父级市码，`query/none` 降为低置信；
   loader 默认拒绝无文本地区证据的县级行。
@@ -409,6 +409,28 @@ A/A1/
 `pandas / requests / beautifulsoup4` 是硬依赖；`trafilatura / pdfplumber / openpyxl / xlrd / anthropic`
 可按需安装，缺哪个就降级：trafilatura→bs4、PDF/xlsx/xls→跳过并标记；缺 `anthropic` 时
 `--extractor rule` 纯规则模式可离线跑完全流程。docx 由标准库 `zipfile` 解析，不依赖 `python-docx`。
+
+### 多指标抽取契约（A2/A3 复用）
+
+抽取层已按 `config/extract_config.py` 的 `INDICATOR_SCOPE` 通用化，A1 仍只启用
+A101/A103；A/A2、A/A3 各自启用本组指标。契约字段：
+
+- `metrics` / `units` / `target_unit`：允许的 `measure_code`、源单位与落库标准单位；
+- `terms`：无空格短词族，规则层与清洗层共用（`techfin_curate.py` 会并入）；
+- `non_target_subjects` / `prefix_reject` / `prefix_allow`：同子句/数字前缀的假阳性守卫；
+- `bind`：数字与指标词的绑定距离，占比指标可配 `prev_clause` 允许“前子句支出词 + 本子句占比”；
+- `stock_default_actual`：无语境词的水平/存量句（如“私募基金管理人 25 家”）默认按 actual 处理
+  （A2/A3 启用；A1 不启用，保持原 unknown 语义）。
+
+**金额单位不在抽取层换算**：抽取层保留原文单位（`value_text` 也是原文），
+`load/techfin_load_to_db.py` 用 `convert_amount_to_standard()` 统一换算到
+`dim_index_measure.standard_unit`。若在抽取层预换算，loader 优先解析 `value_text`
+时会双重换算。
+
+**县域替代口径**：`topic_config.INDEX_KEYWORDS` 的指标可带 `county_queries`；
+`build_search_plan()` 在带地区时优先使用它，无地区时仍用完整 `queries`。
+loader 读取 `dim_index.is_county_applicable`：县级行默认拒绝，需
+`--allow-county-not-applicable` 显式放行（用于 A202/A203 的县域代理值）。
 
 ### 语料清洗/提纯（`clean/techfin_curate.py`）
 
@@ -658,6 +680,8 @@ python tests/test_accuracy_regression.py
 `config/ collect/ fetch/ clean/ extract/ report/ load/` + `run_all.py` + README），然后**主要改以下五处**：
 
 1. **`config/topic_config.py`** —— 这是主要工作：
+   - 主题默认值：`TOPIC_LABEL`、`DEFAULT_LEVEL2`（采集器 `--level2` 的默认值）、
+     `BLOCK_LEVEL3` / `BLOCKABLE_LEVEL3`（loader 默认阻断与交互菜单）。
    - 官方源打标词：`AUTH_KEYWORDS`（官方源爬虫据此给条目打 `keyword` 标签与统计；
      `SAVE_ALL_ITEMS=True` 时不参与筛选入库）。**它由 `INDEX_KEYWORDS` 派生**（取各三级
      指标实际启用的前 `QUERIES_PER_REGION` 条检索式中的短词 + `AUTH_EXTRA_TERMS`），
@@ -666,9 +690,11 @@ python tests/test_accuracy_regression.py
    - 相关性约束：`CORE_TERMS` / `QUALIFIER_TERMS`（仅当检索词整串落在
      `QUALIFIER_TERMS` 里时才生效；本主题留空、机制停用）
    - 指标体系：`INDEX_KEYWORDS`（字段名对齐 `db/10_schema.sql` 的 `dim_index`；
-     每条三级指标带 `level3_code` 稳定编码与 `min_region_level` 可得层级。**权重不在
+     每条三级指标带 `level3_code` 稳定编码。**权重不在
      这里维护**——爬虫不消费权重，唯一权威是 SQL 的 `dim_index` 表，避免两处漂移）
-     与 `ANCHOR_TERMS` / `QUERIES_PER_REGION`；地区口径 `GUANGDONG_REGIONS` /
+     与 `ANCHOR_TERMS` / `QUERIES_PER_REGION`；指标可带 `county_queries`
+     （县域替代口径，带地区时优先于 `queries[:QUERIES_PER_REGION]`）与
+     `anchor_terms`（单指标锚点覆盖）；地区口径 `GUANGDONG_REGIONS` /
      `REGION_QUERY_NAME_OVERRIDES`（换省份就是换这两个常量）
    - 噪声源：`NOISE_DOMAINS` / `NOISE_SOURCES` / `NOISE_URL_SUFFIXES`
    - 采集范围与节奏：`ENABLED_SOURCES` / `SOURCES_BY_REGION_LEVEL`（按检索式粒度选源）、
@@ -677,7 +703,8 @@ python tests/test_accuracy_regression.py
      `OFFICIAL_DELAY` / `SAVE_ALL_ITEMS`
    - 官方源清单：`SOURCES`（**栏目要选"真正发布指标内容"的**：现行是广东省科技厅
      通知公告/政策文件 + 科技部通知通告；指向"新闻/发布会"栏目的源标题里不会有指标词，
-     打标会全空，详见该常量上方的实测注释）
+     打标会全空，详见该常量上方的实测注释）。每个源可带 `enabled`（默认 True）、
+     `max_pages`（覆盖全局翻页数）、`allow_no_date`（列表行无日期时仍保留，日期留空）
    - 产物契约：`DATA_ROOT`（流水线数据根，默认 `data`）、`LOAD_REPORT_ROOT`（入库报告根，
      默认 `reports/db_load`）、`OUTPUT_ROOT`（`DATA_ROOT` 的兼容别名）、`SEARCH_ACCUMULATOR` / `OFFICIAL_ACCUMULATOR`、
      `SEARCH_PROGRESS` / `OFFICIAL_PROGRESS`（续跑台账）、`SEARCH_PREFIX` / `OFFICIAL_PREFIX`、`TOPIC_LABEL`；
@@ -687,12 +714,16 @@ python tests/test_accuracy_regression.py
 2. **两个爬虫里与该主题站点相关的解析函数**（例如 `extract_source_date`、`extract_360_item`、
    `extract_bing_item`、`parse_list_rows` 的行容器启发式）——目标站变了就要跟着改。
 3. 数据根目录名（就是 `topic_config.DATA_ROOT` 那一项）。
-4. **`config/extract_config.py`**（抽取契约）：指标词族 `A101_TERMS`、数值/动词正则、
-   地区别名 `REGION_ALIASES`、LLM 的 `SYSTEM_PROMPT` / `LLM_SCHEMA` / `LLM_MODEL` /
-   `LLM_TRIGGER_MODE`。换指标（不只 A101）就改这里，改完重跑 `techfin_extract_points.py` 即可、**不用重抓网页**。
-5. **`load/techfin_load_to_db.py`（可选）**：只改 `--database`/连接默认值与 `--block-level3` 策略；
-   指标/单位映射从目标库的 `dim_index_measure` 读取，不硬编码 A101/A103。新主题仍建议共用
-   仓库根的 `db/` schema，不要按主题复制一套数据库。
+4. **`config/extract_config.py`**（抽取契约）：`INDICATOR_SCOPE`（每个指标的
+   `metrics`/`units`/`target_unit`/`terms`/`non_target_subjects`/`prefix_reject`/
+   `prefix_allow`/`bind`）、数值/动词正则、地区别名 `REGION_ALIASES`、LLM 的
+   `SYSTEM_PROMPT` / `LLM_SCHEMA` / `LLM_MODEL` / `LLM_TRIGGER_MODE`。换指标就改这里，
+   改完重跑 `techfin_extract_points.py` 即可、**不用重抓网页**。金额换算放在 loader，
+   不要在抽取层预换算。
+5. **`load/techfin_load_to_db.py`（可选）**：只改 `--database`/连接默认值与
+   `--block-level3` 策略；指标/单位映射从目标库的 `dim_index_measure` 读取，不硬编码
+   具体指标码。A202/A203 这类 `is_county_applicable=0` 的指标，县级入库需显式
+   `--allow-county-not-applicable`。新主题仍建议共用仓库根的 `db/` schema，不要按主题复制一套数据库。
 
 **不需要碰 `crawler_common.py`。** 这正是把它拆出去的目的：通用机械一份，主题差异各管各的。
 不同主题的输出根互相独立，因此**当日序号互不干扰**（`resolve_run_dir` 只扫本主题的输出根，

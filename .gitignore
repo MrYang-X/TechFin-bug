@@ -38,6 +38,12 @@ A/A1/reports/db_load/
 # 旧产物根：只读保留，不跟踪。
 A/A1/techfin_common_output/
 
+# A/A2、A/A3 流水线与入库产物（主题独立数据根/报告根）
+A/A2/data/
+A/A2/reports/db_load/
+A/A3/data/
+A/A3/reports/db_load/
+
 # 测试临时数据根与生成物（fixtures 源文件保留，运行产物忽略）。
 A/A1/tests/tmp_*/
 A/A1/tests/fixtures/reports/
@@ -46,6 +52,24 @@ A/A1/tests/fixtures/**/techfin_a101_points.csv
 A/A1/tests/fixtures/**/coverage_*.csv
 A/A1/tests/fixtures/**/coverage_*.json
 A/A1/tests/fixtures/**/a101_llm_*
+
+A/A2/tests/tmp_*/
+A/A2/tests/fixtures/reports/
+A/A2/tests/fixtures/**/curated_*.csv
+A/A2/tests/fixtures/**/techfin_a2_points.csv
+A/A2/tests/fixtures/**/coverage_*.csv
+A/A2/tests/fixtures/**/coverage_*.json
+A/A2/tests/fixtures/**/points_a2_*
+A/A2/tests/fixtures/**/a2_llm_*
+
+A/A3/tests/tmp_*/
+A/A3/tests/fixtures/reports/
+A/A3/tests/fixtures/**/curated_*.csv
+A/A3/tests/fixtures/**/techfin_a3_points.csv
+A/A3/tests/fixtures/**/coverage_*.csv
+A/A3/tests/fixtures/**/coverage_*.json
+A/A3/tests/fixtures/**/points_a3_*
+A/A3/tests/fixtures/**/a3_llm_*
 
 # 运行目录命名「四位年.月.日-次数」与主题无关（A/A1、A/A2 均适用）。
 **/[0-9][0-9][0-9][0-9].[0-9]*.[0-9]*-[0-9]*/

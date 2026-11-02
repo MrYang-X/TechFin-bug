@@ -17,23 +17,60 @@ A101_TERMS = [
     "有效高新技术企业", "高新技术企业数量", "高企数量", "高企",
 ]
 
+# ==================== 单位 → 口径映射（通用）====================
+# 抽取层只负责识别"这个数字属于哪个口径"；金额的跨单位换算统一放在 loader，
+# 避免 loader 优先解析 value_text 时发生双重换算。
+UNIT_METRIC = {
+    "家": "count", "户": "count", "个": "count", "所": "count",
+    "件": "count", "起": "count",
+    "家/万人": "density", "家/万": "density", "户/万人": "density",
+    "家每万人": "density", "个/万人": "density", "个每万人": "density",
+    "亿元": "amount", "万元": "amount", "元": "amount", "万亿元": "amount",
+    "%": "share", "％": "share",
+}
+COUNT_UNITS = {"家", "户", "个", "所", "件", "起"}
+DENSITY_UNITS = {"家/万人", "家/万", "户/万人", "家每万人",
+                 "个/万人", "个每万人"}
+AMOUNT_UNITS = {"亿元", "万元", "元", "万亿元"}
+SHARE_UNITS = {"%", "％"}
+ALL_UNITS = set(UNIT_METRIC)
+
 # 指标-口径-单位契约：抽取层只允许产出这里启用的指标。
-# 这是 A103 系统性错标的根因修复之一：规则层只匹配 A101 词族，就不能继承文章级的 A103 编码。
-#   metrics：允许的 measure_code
-#   units  ：允许的观测单位（空单位不在此列，会被判为不合法并进入 points_dropped.csv）
+# 这是 A103 系统性错标的根因修复之一：规则层只匹配已启用指标的词族，就不会继承文章级的错误编码。
+#   metrics        ：允许的 measure_code
+#   units          ：允许的源单位（金额指标允许元/万元/亿元/万亿元，落库前由 loader 换算）
+#   target_unit    ：落库标准单位（供 loader 校验/换算）
+#   terms          ：规则层与清洗层共用的无空格词族
+#   non_target_subjects：同子句出现即拒绝的非目标主语
+#   prefix_reject  ：数字前局部窗口出现即拒绝的词（如"增长/同比"）
+#   prefix_allow   ：占比指标专用，出现即允许（如"占比/比重"）
+#   bind           ：数字与指标词的绑定距离（同子句/列表项/前子句）
 INDICATOR_SCOPE = {
     "A101": {
         "level3_name": "高新技术企业数量/密度",
         "metrics": {"count", "density"},
         "units": {"家", "户", "个", "家/万人", "家/万", "户/万人", "家每万人"},
+        "target_unit": "家",
         "terms": A101_TERMS,
+        "non_target_subjects": (
+            "科技型中小企业", "研发机构", "孵化器", "服务机构", "创新平台",
+            "科技项目", "认定名单", "入库企业", "规上企业",
+        ),
+        "prefix_reject": (),
+        "prefix_allow": (),
+        "bind": {"same_clause": 25, "bare": 60},
     },
     # A103 目前不由规则层产出；保留契约供 LLM/未来扩展使用，单位必须是百分比。
     "A103": {
         "level3_name": "R&D经费支出占GDP比重",
         "metrics": {"share"},
         "units": {"%", "％"},
+        "target_unit": "%",
         "terms": [],
+        "non_target_subjects": (),
+        "prefix_reject": (),
+        "prefix_allow": (),
+        "bind": {"same_clause": 25, "bare": 60},
     },
 }
 
@@ -49,7 +86,7 @@ YEAR_SRC_CONF = {
     "none": 0.0,
 }
 
-# 数量类单位（"家/户/个"）与密度类单位（"家/万人"）——数值语义靠这里区分 metric。
+# 数量类单位（"家/户/个"）与密度类单位（"家/万人"）——保留旧常量名，供旧调用兼容。
 COUNT_UNIT = r"(?:家|户|个)"
 DENSITY_UNIT = r"(?:家/万人|家/万|户/万人|家每万人)"
 # 阿拉伯数字：允许千分位与小数
@@ -57,9 +94,11 @@ _NUM = r"(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?"
 # 数字 + 可选量级词 + 单位。量级词"万余/万"表示 ×10000，"余/多"表示近似。
 # 负向后视 (?<![每第]) 排除"每家""第 X 家"这类非计数的假阳性。
 # pre 把"近/超/逾/约/超过/突破"并入同一次匹配，避免与 APPROX_RE 重复产点。
+# 单位按长度倒序，避免"亿元"被"元"抢先。
+_UNIT_ALT = "|".join(re.escape(u) for u in sorted(ALL_UNITS, key=len, reverse=True))
 NUM_UNIT_RE = re.compile(
     rf"(?<![每第])(?P<pre>近|超|逾|约|超过|突破|首次突破)?\s*"
-    rf"(?P<num>{_NUM})\s*(?P<mag>万余|万|余|多)?\s*(?P<unit>{COUNT_UNIT}|{DENSITY_UNIT})"
+    rf"(?P<num>{_NUM})\s*(?P<mag>万余|万(?![元亿])|余|多)?\s*(?P<unit>{_UNIT_ALT})"
 )
 # 单位直接跟在数字后、无空格的情况（如"302家"）已被上式覆盖；此式另抓"近/超/逾/约 N 家"。
 APPROX_RE = re.compile(r"(?P<pre>近|超|逾|约|超过|突破)\s*(?P<num>\d[\d,]*(?:\.\d+)?)\s*(?P<unit>家|户|个)")

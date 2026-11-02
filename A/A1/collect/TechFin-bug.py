@@ -927,8 +927,10 @@ def parse_args(argv=None):
                     help="数据根目录（覆盖 topic_config.DATA_ROOT）。"
                          "相对路径锚定到本脚本所在目录，也可写绝对路径把"
                          "数据放到仓库外")
-    ap.add_argument("--level2", nargs="*", default=["A1"],
-                    help="只采指定二级指标，如 --level2 A1 A2（默认 A1）")
+    ap.add_argument("--level2", nargs="*",
+                    default=list(getattr(cfg, "DEFAULT_LEVEL2", ["A1"])),
+                    help="只采指定二级指标，如 --level2 A1 A2"
+                         "（默认取 topic_config.DEFAULT_LEVEL2）")
     ap.add_argument("--cities", nargs="*", default=None,
                     help="只采广东省内的指定地级市，如 --cities 广州市 深圳市"
                          "（默认全省 124 个县级单元）")
@@ -968,8 +970,10 @@ def main(argv=None):
         for i, p in enumerate(plans, 1):
             level = "county" if p.get("region_code") else "none"
             srcs = "+".join(cfg.SOURCES_BY_REGION_LEVEL.get(level, ()))
-            print(f"{i:>4}. [{p['region_name'] or '无地区'}·{level}→{srcs}]"
-                  f" {p['level3_name']}  →  {p['query']}")
+            repl = "·县域替代" if p.get("county_replacement") else ""
+            anchor = "+".join(p.get("anchor_terms") or ()) or "-"
+            print(f"{i:>4}. [{p['region_name'] or '无地区'}·{level}{repl}→{srcs}"
+                  f"|anchor={anchor}] {p['level3_name']}  →  {p['query']}")
         return
 
     if not plans:

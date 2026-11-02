@@ -389,8 +389,8 @@ WHERE region_code = '440100' AND level3_code = 'A103';
 |---|---|---|
 | `tech_finance_index_migration.sql` | 工作区现存 | **旧结构的增量迁移脚本**，假设旧表已存在；不要在新库 `techfin` 执行，保留作历史参考 |
 | `tech_finance_index.sql` | 已从工作区删除（仅 git HEAD） | 旧首建脚本，含旧权重列；不要恢复后直接执行 |
-| `A/A1/config/topic_config.py` | 现存 | 35 条指标、检索词、区划的权威来源；`dim_index` 种子与它对齐 |
-| `A/A1/config/extract_config.py` | 现存 | `context_type`、`metric`、`unit` 的语义来源 |
+| `A/A1`、`A/A2`、`A/A3/config/topic_config.py` | 现存 | 三个主题各自维护本组指标的检索词/区划；三份合起来覆盖 35 条指标，`dim_index` 种子与它们对齐 |
+| `A/A1`、`A/A2`、`A/A3/config/extract_config.py` | 现存 | `context_type`、`metric`、`unit` 的语义来源；A2/A3 的 `INDICATOR_SCOPE` 定义金额/占比/密度口径 |
 
 新库的唯一基线是本目录 `db/00—90`。未来结构变更请新增 `db/migrations/YYYYMMDD_NNN_描述.sql`，不要直接改 `10_schema.sql` 后重跑。
 

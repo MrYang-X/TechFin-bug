@@ -119,23 +119,50 @@ def split_sentences(text):
 
 
 def find_indicator(sent):
-    """该句是否提及 A101 指标族，返回命中的词（无则空串）。"""
-    for t in ec.A101_TERMS:
-        if t in sent:
-            return t
+    """该句是否提及任一已启用指标族，返回命中的词（无则空串）。"""
+    for scope in ec.INDICATOR_SCOPE.values():
+        for t in scope.get("terms", ()):
+            if t in sent:
+                return t
     return ""
 
 
 def find_indicator_scope(sent):
     """
-    返回 (命中词, 指标编码)。当前规则层只启用 A101；
-    以后扩指标时在 extract_config.INDICATOR_SCOPE 里加词族即可。
+    返回 (命中词, 指标编码)。多词命中时取【最长词】，
+    避免"私募基金"抢走"私募基金管理规模"、"高企"抢走"国家高新技术企业"。
+    规则层只启用 INDICATOR_SCOPE 里有非空 terms 的指标。
     """
+    best_term, best_code = "", ""
     for code, scope in ec.INDICATOR_SCOPE.items():
         for term in scope.get("terms", ()):
-            if term in sent:
-                return term, code
-    return "", ""
+            if len(term) > len(best_term) and term in sent:
+                best_term, best_code = term, code
+    return best_term, best_code
+
+
+def scope_at(sent, pos):
+    """
+    给定数字位置，返回最近的 (指标词, 指标编码)；优先同子句，其次全句。
+    同距离时取更长的词，保证"私募基金管理规模"优先于"私募基金"。
+    """
+    clause_left, clause_right = _clause_bounds(sent, pos)
+    best = None
+    for code, scope in ec.INDICATOR_SCOPE.items():
+        for term in scope.get("terms", ()):
+            start = 0
+            while True:
+                i = sent.find(term, start)
+                if i < 0:
+                    break
+                same_clause = 0 if clause_left <= i < clause_right else 1
+                cand = (same_clause, abs(i - pos), -len(term), code, term)
+                if best is None or cand < best:
+                    best = cand
+                start = i + 1
+    if not best:
+        return "", ""
+    return best[4], best[3]
 
 
 def validate_points(points):
@@ -165,9 +192,17 @@ def validate_points(points):
     return valid, dropped
 
 
-def _metric_of(unit):
-    if unit and ("/" in unit or unit == "家每万人"):
-        return "density"
+def _metric_of(unit, scope=None):
+    """单位 → measure_code；未登记的单位回退到指标默认口径。"""
+    metric = ec.UNIT_METRIC.get(unit, "")
+    if metric:
+        return metric
+    if scope:
+        metrics = scope.get("metrics") or ()
+        if "count" in metrics:
+            return "count"
+        if metrics:
+            return sorted(metrics)[0]
     return "count"
 
 
@@ -178,8 +213,12 @@ def _num_value(num, mag):
     return v
 
 
-def classify_context(text):
-    """判定语境类型。顺序：planned/target/decline 优先于 actual（避免"拟新增"被当成"新增"）。"""
+def classify_context(text, default_actual=False):
+    """判定语境类型。顺序：planned/target/decline 优先于 actual（避免"拟新增"被当成"新增"）。
+
+    default_actual=True 时，无任何语境词的水平/存量句（如"私募基金管理人25家"）
+    默认按 actual 处理；A1 不启用，保持原有 unknown 语义。
+    """
     for v in ec.PLANNED_VERBS:
         if v in text:
             return "planned", v
@@ -192,6 +231,8 @@ def classify_context(text):
     for v in ec.ACTUAL_VERBS:
         if v in text:
             return "actual", v
+    if default_actual:
+        return "actual", "存量口径"
     return "unknown", ""
 
 
@@ -236,11 +277,14 @@ def _prev_clause(text, left):
     return text[j + 1:left - 1].strip()
 
 
-def _bare_number_clause(clause):
-    """子句是否只有"数字+单位"（列表项，如"147家"）。"""
+def _bare_number_clause(clause, units=None):
+    """子句是否只有"数字+单位"（列表项，如"147家"）。units 为空时用全部已登记单位。"""
+    unit_set = set(units) if units else ec.ALL_UNITS
+    alt = "|".join(re.escape(u) for u in sorted(unit_set, key=len, reverse=True))
+    if not alt:
+        return False
     return bool(re.fullmatch(
-        r"\s*[\d,]+(?:\.\d+)?\s*(?:万余|万|余|多)?\s*"
-        r"(?:家|户|个|家/万人|家/万|户/万人|家每万人)\s*", clause or ""))
+        rf"\s*[\d,]+(?:\.\d+)?\s*(?:万余|万|余|多)?\s*(?:{alt})\s*", clause or ""))
 
 
 def _nearest_term_pos(text, term, pos):
@@ -268,8 +312,9 @@ def _clause_bounds(text, pos):
     return left, right
 
 
-def _aggregation_type(text, pos):
-    """子句级口径：total / subset / breakdown / aggregate。"""
+def _aggregation_type(text, pos, terms=None, units=None):
+    """子句级口径：total / subset / breakdown / aggregate。terms 为当前指标的词族。"""
+    terms = tuple(terms or ec.A101_TERMS)
     clause, left, _ = _clause_at(text, pos)
     if any(w in clause for w in _LEAD_BREAKDOWN):
         return "breakdown"
@@ -277,7 +322,7 @@ def _aggregation_type(text, pos):
         return "aggregate"
     if any(w in clause for w in _LEAD_SUBSET):
         return "subset"
-    if _bare_number_clause(clause):
+    if _bare_number_clause(clause, units):
         prev = _prev_clause(text, left)
         if any(w in prev for w in _LEAD_BREAKDOWN):
             return "breakdown"
@@ -287,7 +332,7 @@ def _aggregation_type(text, pos):
             return "subset"
         # 列表项：句首引导子句含"分别有/各区"，且已出现指标词
         prefix = text[:left]
-        if any(w in prefix for w in _LEAD_BREAKDOWN) and any(t in prefix for t in ec.A101_TERMS):
+        if any(w in prefix for w in _LEAD_BREAKDOWN) and any(t in prefix for t in terms):
             return "breakdown"
     return "total"
 
@@ -296,7 +341,7 @@ def _aggregation_type(text, pos):
 
 def _make_point(article, meta, region, value_num, value_text, unit, metric,
                 stat_year, stat_period, ctype, cue, snippet, locator,
-                method, confidence, llm=None, year_src="", level3_code="A101",
+                method, confidence, llm=None, year_src="", level3_code="",
                 aggregation_type="total", year_confidence="", year_evidence="",
                 evidence_verified=""):
     code, name, level, city, rfrom = region[:5]
@@ -411,13 +456,42 @@ def _year_evidence(sent, window, doc_text, src, year):
     return m.group(0).strip() if m else f"{int(year)}年"
 
 
+def _prefix_gate(prefix, scope):
+    """数字前缀门禁：最近的关键词是拒绝词则拒绝；允许词更近则放行。"""
+    rejects = [prefix.rfind(w) for w in scope.get("prefix_reject", ())]
+    allows = [prefix.rfind(w) for w in scope.get("prefix_allow", ())]
+    rp = max(rejects) if rejects else -1
+    ap = max(allows) if allows else -1
+    if rp < 0:
+        return True
+    if ap < 0:
+        return False
+    return ap > rp
+
+
+def _adapt_unit(sent, m, code):
+    """
+    密度指标特例：把"每万人拥有银行网点 3.2 个"里的"个"改写为"个/万人"。
+    数字本身已经是每万人口径，不做数值换算。
+    """
+    unit = m.group("unit")
+    if code != "A204" or unit != "个":
+        return unit
+    clause, _, _ = _clause_at(sent, m.start())
+    prefix = sent[max(0, m.start() - 20):m.start()]
+    if "每万人" in clause or "每万人" in prefix:
+        return "个/万人"
+    return unit
+
+
 def extract_sentence(sent, window, offset, label, article, meta, idx, doc_text=""):
     """对单个含指标词的句子跑规则匹配，返回数据点列表。"""
     term, indicator_code = find_indicator_scope(sent)
     if not indicator_code:
         return []
     points = []
-    ctype, cue = classify_context(sent)
+    ctype, cue = classify_context(
+        sent, default_actual=bool(ec.INDICATOR_SCOPE[indicator_code].get("stock_default_actual")))
     year, ysrc = infer_stat_year(sent, window, meta, doc_text)
     yconf = ec.YEAR_SRC_CONF.get(ysrc, 0.2)
     yevid = _year_evidence(sent, window, doc_text, ysrc, year)
@@ -425,37 +499,71 @@ def extract_sentence(sent, window, offset, label, article, meta, idx, doc_text="
     src = ("body", f"char:{offset}") if label == "body" else (label, "")
 
     for m in ec.NUM_UNIT_RE.finditer(sent):
-        unit = m.group("unit")
-        num = m.group("num")
-        mag = m.group("mag")
-        # 指标与数字必须同子句；列表项（纯"数字+单位"）允许从引导子句延续
-        clause, _, _ = _clause_at(sent, m.start())
-        if any(t in clause for t in _NON_TARGET_SUBJECTS) and term not in clause:
-            continue
-        term_pos, d = _nearest_term_pos(sent, term, m.start())
+        # 每个数字单独判定所属指标：同子句最近词优先；找不到再回退整句指标。
+        cand_term, cand_code = scope_at(sent, m.start())
+        code = cand_code or indicator_code
+        scope = ec.INDICATOR_SCOPE.get(code, {})
+        unit = _adapt_unit(sent, m, code)
+        term2 = cand_term or term
+        # 单位必须属于该指标；否则尝试整句指标，仍不符则跳过。
+        if unit not in scope.get("units", ()):
+            fallback = ec.INDICATOR_SCOPE.get(indicator_code, {})
+            unit = _adapt_unit(sent, m, indicator_code)
+            if unit not in fallback.get("units", ()):
+                continue
+            code, scope, term2 = indicator_code, fallback, term
+
+        clause, clause_left, _ = _clause_at(sent, m.start())
+        prefix = sent[max(0, m.start() - 30):m.start()]
+        # 非目标主语比指标词更靠近数字时拒绝：如"风险补偿资金池累计补偿金额5000万元"
+        # 里的 5000 万元属于"补偿金额"，不是资金池规模。
+        subjects = scope.get("non_target_subjects", _NON_TARGET_SUBJECTS)
+        subject_positions = [prefix.rfind(t) for t in subjects if t in prefix]
+        if subject_positions:
+            term_rel = prefix.rfind(term2)
+            if term_rel < 0 or max(subject_positions) >= term_rel:
+                continue
+
+        term_pos, d = _nearest_term_pos(sent, term2, m.start())
         same_clause = _clause_bounds(sent, term_pos) == _clause_bounds(sent, m.start())
-        if not ((same_clause and d <= 25) or (_bare_number_clause(clause) and d <= 60)):
+        bind = scope.get("bind") or {}
+        ok_bind = ((same_clause and d <= bind.get("same_clause", 25))
+                   or (_bare_number_clause(clause, scope.get("units"))
+                       and d <= bind.get("bare", 60)))
+        # 占比类允许"前子句支出词 + 本子句占比"的跨子句绑定（如"财政科技支出50亿元，占…4.2%"）。
+        if not ok_bind and bind.get("prev_clause"):
+            prev = _prev_clause(sent, clause_left)
+            if (any(w in clause for w in bind.get("prev_clause_terms", ()))
+                    and term2 in prev and d <= bind["prev_clause"]):
+                ok_bind = True
+        if not ok_bind:
             continue
+
+        if not _prefix_gate(prefix, scope):
+            continue
+
         # 地区按“数字锚点”判定，同一句里不同数字可归属不同地区/口径。
         # 列表项（"3082家、147家、2315家"）的锚点窗口可能看不到句首地区，
         # 此时回退到整句匹配，让列表继承句首的市/区口径。
         region = rr.match_region(sent, m.start(), meta, idx)
-        if region.source == "aggregate" and _bare_number_clause(_clause_at(sent, m.start())[0]):
+        if region.source == "aggregate" and _bare_number_clause(_clause_at(sent, m.start())[0],
+                                                                scope.get("units")):
             region = rr.match_region(sent, None, meta, idx)
         if not region.code or region.source in ("aggregate", "scope_national"):
             continue
-        agg_type = _aggregation_type(sent, m.start())
-        val = _num_value(num, mag)
+        agg_type = _aggregation_type(sent, m.start(), scope.get("terms"),
+                                     scope.get("units"))
+        val = _num_value(m.group("num"), m.group("mag"))
         vtext = m.group(0).strip()
         conf = 0.9 if d <= 30 else 0.65
         if ctype == "unknown":
             conf -= 0.15
-        if mag in ("余", "多"):
+        if m.group("mag") in ("余", "多"):
             conf -= 0.15
         points.append(_make_point(
-            article, meta, region, val, vtext, unit, _metric_of(unit),
+            article, meta, region, val, vtext, unit, _metric_of(unit, scope),
             year, period, ctype, cue, sent, src, "rule", max(conf, 0.2),
-            year_src=ysrc, level3_code=indicator_code,
+            year_src=ysrc, level3_code=code,
             aggregation_type=agg_type,
             year_confidence=yconf, year_evidence=yevid))
 
@@ -676,6 +784,9 @@ def llm_points(data, article, meta, idx):
     llm = {"model": data.get("_model", ec.LLM_MODEL),
            "prompt_version": data.get("_prompt_version", ec.PROMPT_VERSION)}
     for dp in data.get("data_points", []):
+        indicator = str(dp.get("indicator", "") or "")
+        if indicator not in ec.INDICATOR_SCOPE:
+            continue                      # 指标码不在本主题契约内，直接丢弃
         snippet = str(dp.get("evidence_snippet", "") or "")
         locator, verified = _locate_evidence(article, snippet)
         code = str(dp.get("region_code", "") or "")
@@ -704,7 +815,7 @@ def llm_points(data, article, meta, idx):
             dp.get("context_type", "unknown"), str(dp.get("context_cue", "") or ""),
             snippet, locator, "llm", float(dp.get("confidence", 0.6) or 0.6), llm=llm,
             year_src=("llm" if dp.get("stat_year") else "none"),
-            level3_code=str(dp.get("indicator", "") or "A101"),
+            level3_code=indicator,
             year_confidence=(ec.YEAR_SRC_CONF.get("llm", 0.75) if dp.get("stat_year") else 0.0),
             year_evidence=str(dp.get("stat_period", "") or
                               (f"{dp.get('stat_year')}年" if dp.get("stat_year") else "")),
@@ -1001,7 +1112,7 @@ def write_extraction_report(path, stats, extractor, llm_degraded, llm_fatal):
 def run_once(run_dir, paths, cache_dir, out_root, extractor="hybrid", limit=None,
              allow_rule_fallback=False, max_llm_failure_rate=ec.LLM_MAX_FAILURE_RATE):
     print("=" * 60)
-    print(f"{cfg.TOPIC_LABEL} · 数值数据点抽取（A101，{extractor}）")
+    print(f"{cfg.TOPIC_LABEL} · 数值数据点抽取（{'、'.join(ec.INDICATOR_SCOPE)}，{extractor}）")
     print("=" * 60)
 
     articles = apply_curated_filter(load_cached_articles(cache_dir), out_root)
@@ -1145,7 +1256,7 @@ def artifact_paths(run_dir):
 
 def parse_args(argv=None):
     ap = argparse.ArgumentParser(
-        description=f"{cfg.TOPIC_LABEL} · 数值数据点抽取（A101）")
+        description=f"{cfg.TOPIC_LABEL} · 数值数据点抽取（{'、'.join(ec.INDICATOR_SCOPE)}）")
     ap.add_argument("--output-dir", help="数据根目录（覆盖 topic_config.DATA_ROOT）")
     ap.add_argument("--extractor", choices=["rule", "hybrid"], default="hybrid",
                     help="rule=只跑规则层（零 LLM 成本）；hybrid=规则+LLM 兜底（默认）")

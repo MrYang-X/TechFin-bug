@@ -2,7 +2,7 @@
 科技金融指数研究 · CSV → MySQL 数据迁移/入库（techfin_load_to_db.py，可选后处理）
 
 职责：读取流水线数据根 `A/A1/data/` 中的聚合级数据（默认最新一轮
-`*/points_resolved.csv`），用证据级 `techfin_a101_points.csv` / `points_delta.csv`
+`*/points_resolved.csv`），用证据级 `cfg.POINTS_ACCUMULATOR` / `points_delta.csv`
 补齐单位、语境、发布日期与证据片段，经严格校验后写入 MySQL 的
 `fact_index_value` 表。入库报告默认写到独立的 `A/A1/reports/db_load/<YYYY.M.D-N>/`，
 不与爬虫运行目录混放。
@@ -11,8 +11,8 @@
   - 系统记录只写 `fact_index_value`，不新增文章/证据表；article_id 存 `evidence_ref`。
   - 默认严格过滤：只入 actual + 有值 + 指标/单位匹配 + 非假阳性 + 地区一致的行。
   - 地区/年份/拆分口径/指标状态均有门禁，详见 `--help` 与 README。
-  - A103 默认阻断（抽取层已强制规则层只产 A101，loader 作最后一道闸门）。
-  - 单位存实际观测单位，不做跨单位换算；value_text 保留原文。
+  - A103 默认阻断（防御性设置；抽取层只产已启用指标，loader 作最后一道闸门）。
+  - 金额族（元/万元/亿元/万亿元）换算到标准单位；其他单位存实际观测单位；value_text 保留原文。
   - 幂等：以 `(region_code, year, level3_code, measure_code, context_type)` 为键 upsert；
     `--skip-imported` 再按文件 SHA-256 做文件级幂等。
   - 所有可疑行写入 `load_errors.csv`，不静默丢弃；默认 transaction 模式整体回滚。
@@ -102,7 +102,7 @@ except ImportError:  # pragma: no cover - 运行环境缺依赖时给出中文�
 
 LOADER_VERSION = "load-v1"
 DEFAULT_DATABASE = "techfin"
-DEFAULT_BLOCK_LEVEL3 = "A103"
+DEFAULT_BLOCK_LEVEL3 = str(getattr(cfg, "BLOCK_LEVEL3", "A103") or "")
 DEFAULT_BATCH_SIZE = 500
 
 RESOLVED_REQUIRED = [
@@ -151,7 +151,7 @@ CHOSEN_RE = re.compile(r"→\s*(actual|planned|target|decline|unknown)\s*$")
 
 # 存量型指标：批次公告里的数字通常不是存量，严格模式拒绝
 STOCK_INDICATORS = {
-    "A101", "A102", "A201", "A202", "A203", "A204",
+    "A101", "A102", "A201", "A202", "A203", "A204", "A302",
     "B101", "B103", "B201", "B202", "B203", "B204",
     "B301", "B302", "B401", "C101", "C102", "C103",
     "C202", "C301", "D102", "D201", "D202",
@@ -495,6 +495,8 @@ def unit_compatible(actual: str, standard: str) -> tuple[bool, str]:
     if not a:
         if st == "%":
             return False, "PERCENT_UNIT_MISSING"
+        if st in ("元", "万元", "亿元", "万亿元"):
+            return False, "UNIT_MISSING"      # 金额指标不猜单位
         return True, "UNIT_ASSUMED"
 
     if st == "%":
@@ -510,17 +512,45 @@ def unit_compatible(actual: str, standard: str) -> tuple[bool, str]:
     if st == "个":
         return (a == "个", "" if a == "个" else "UNIT_MISMATCH")
 
+    if st == "个/万人":
+        # 原文"每万人拥有 X 个"时，抽取层保留"个"，这里按密度口径接收并标记 UNIT_ASSUMED。
+        if a in ("个/万人", "个每万人"):
+            return True, ""
+        if a == "个":
+            return True, "UNIT_ASSUMED"
+        return False, "UNIT_MISMATCH"
+
     if st in ("家/万人", "件/万人"):
         allowed = {st, st.replace("/万人", "每万人")}
         if st == "家/万人":
             allowed.add("户/万人")
         return (a in allowed, "" if a in allowed else "UNIT_MISMATCH")
 
-    if st in ("元", "万元", "亿元"):
-        allowed = {"元", "万元", "亿元"}
+    if st in ("元", "万元", "亿元", "万亿元"):
+        allowed = {"元", "万元", "亿元", "万亿元"}
         return (a in allowed, "" if a in allowed else "UNIT_MISMATCH")
 
     return (a == st, "" if a == st else "UNIT_MISMATCH")
+
+
+# 金额族换算：抽取层保留原文单位，loader 统一换算到 dim_index_measure.standard_unit。
+UNIT_TO_YUAN = {"元": 1.0, "万元": 1e4, "亿元": 1e8, "万亿元": 1e12}
+AMOUNT_UNITS = set(UNIT_TO_YUAN)
+
+
+def amount_factor(unit: str, standard_unit: str) -> float | None:
+    """源单位 → 标准单位的乘数；任一侧不是金额单位返回 None。"""
+    src = normalize_unit(unit)
+    dst = normalize_unit(standard_unit)
+    if src not in UNIT_TO_YUAN or dst not in UNIT_TO_YUAN:
+        return None
+    return UNIT_TO_YUAN[src] / UNIT_TO_YUAN[dst]
+
+
+def convert_amount_to_standard(num: float, unit: str, standard_unit: str) -> float:
+    """把金额数值从源单位换算到标准单位；非金额单位原样返回。"""
+    factor = amount_factor(unit, standard_unit)
+    return num if factor is None else num * factor
 
 
 # ==================== 语境/假阳性/地区/年份检测 ====================
@@ -827,7 +857,8 @@ def load_dimensions(conn) -> Dims | None:
         "regions": "SELECT region_code, region_name, region_full_name, region_level, parent_code, city_code, province_code, region_type, is_active FROM dim_region",
         "measures": "SELECT level3_code, measure_code, measure_name, standard_unit, value_kind, is_primary FROM dim_index_measure",
         "channels": "SELECT channel_code, channel_name, default_quality FROM dim_source_channel",
-        "indexes": "SELECT level3_code, level3_name, level1_code, level2_code, status FROM dim_index",
+        "indexes": "SELECT level3_code, level3_name, level1_code, level2_code, status, "
+                   "is_county_applicable, county_replacement FROM dim_index",
     }
     data: dict[str, list[dict[str, Any]]] = {}
     try:
@@ -1155,10 +1186,26 @@ def build_present_record(
         n_sources = len(ids)
     value_min = parse_float(s(row, "value_min"))
     value_max = parse_float(s(row, "value_max"))
+    # 金额族：value_min/max 是证据级原单位，按证据点单位换算到标准单位。
+    if measure["standard_unit"] in AMOUNT_UNITS:
+        factor = amount_factor(s(point, "unit") or parsed.unit,
+                               measure["standard_unit"])
+        if factor is not None:
+            if value_min is not None:
+                value_min *= factor
+            if value_max is not None:
+                value_max *= factor
     if value_min is None:
         value_min = parsed.num
     if value_max is None:
         value_max = parsed.num
+
+    remark = build_remark(
+        row, point, measure, actual_unit, verified,
+        assumed_unit, parsed.approx, partial_batch,
+    )
+    if (ctx or {}).get("county_replacement"):
+        remark = (remark + "；county_replacement=1") if remark else "county_replacement=1"
 
     return {
         "_row_no": 0,
@@ -1182,10 +1229,7 @@ def build_present_record(
         "evidence_ref": evidence_ref,
         "source_publish_date": publish_date,
         "chosen_reason": _clip(s(row, "chosen_reason"), 255, "chosen_reason", ctx),
-        "remark": _clip(build_remark(
-            row, point, measure, actual_unit, verified,
-            assumed_unit, parsed.approx, partial_batch,
-        ), 500, "remark", ctx),
+        "remark": _clip(remark, 500, "remark", ctx),
     }
 
 
@@ -1261,8 +1305,8 @@ def evaluate_row(row: Any, ctx: dict[str, Any]) -> tuple[dict[str, Any] | None, 
     if level3 in args.block_level3:
         issues.append(make_issue(
             ctx, "reject", "policy", "LEVEL3_BLOCKED",
-            f"{level3} 被 --block-level3 阻断（当前 A103 存在系统性 count/家 错配）",
-            "如确认数据合法，使用 --allow-level3 A103 显式放开。",
+            f"{level3} 被 --block-level3 阻断（默认阻断 A103 以防御指标口径错配）",
+            f"如确认数据合法，使用 --allow-level3 {level3} 显式放开。",
         ))
         return None, issues
     index_info = dims.indexes.get(level3) or {}
@@ -1274,6 +1318,27 @@ def evaluate_row(row: Any, ctx: dict[str, Any]) -> tuple[dict[str, Any] | None, 
             "如确认仍要写入，使用 --allow-inactive-index。",
         ))
         return None, issues
+
+    # 3.1) 县域适用性：dim_index.is_county_applicable=0 的指标，县级行默认拒绝。
+    # A202/A203 的县域替代口径数据需显式 --allow-county-not-applicable 放行。
+    ica = index_info.get("is_county_applicable")
+    county_not_applicable = (ica is not None and int(ica) == 0)
+    if (county_not_applicable and int(region.get("region_level") or 0) == 3):
+        replacement = str(index_info.get("county_replacement") or "")
+        if not getattr(args, "allow_county_not_applicable", False):
+            issues.append(make_issue(
+                ctx, "reject", "policy", "COUNTY_NOT_APPLICABLE",
+                f"{level3} 的 is_county_applicable=0，县域不适用"
+                + (f"（替代口径：{replacement}）" if replacement else ""),
+                "如研究设计需要县域代理值，使用 --allow-county-not-applicable。",
+            ))
+            return None, issues
+        ctx["county_replacement"] = True
+        issues.append(make_issue(
+            ctx, "warn", "soft", "COUNTY_REPLACEMENT",
+            f"{level3} 县域不适用，按替代口径放行"
+            + (f"：{replacement}" if replacement else ""),
+        ))
 
     # 3.5) 年份先校验：放在空值分支之前，避免 --include-missing 对空年份 int("") 崩溃
     year_value = parse_int(stat_year)
@@ -1290,7 +1355,7 @@ def evaluate_row(row: Any, ctx: dict[str, Any]) -> tuple[dict[str, Any] | None, 
             issues.append(make_issue(
                 ctx, "reject", "hard", "MEASURE_NOT_FOUND",
                 f"({level3}, {metric}) 不在 dim_index_measure",
-                "检查 metric 是否与指标口径一致；A103 应为 share/%，不是 count/家。",
+                "检查 metric 是否与 dim_index_measure 的 measure_code 一致。",
             ))
             return None, issues
     else:
@@ -1333,7 +1398,7 @@ def evaluate_row(row: Any, ctx: dict[str, Any]) -> tuple[dict[str, Any] | None, 
     if point is None:
         issues.append(make_issue(
             ctx, "reject", "hard", enrich_err or "ENRICH_NO_EVIDENCE",
-            f"无法从 points_delta/techfin_a101_points 匹配到唯一证据点（{enrich_err}）",
+            f"无法从 points_delta/{cfg.POINTS_ACCUMULATOR} 匹配到唯一证据点（{enrich_err}）",
             "检查 source_article_ids、level3_code、region_code、stat_year、value_num 是否与证据级一致。",
         ))
         return None, issues
@@ -1366,13 +1431,37 @@ def evaluate_row(row: Any, ctx: dict[str, Any]) -> tuple[dict[str, Any] | None, 
         return None, issues
 
     actual_unit = parsed.unit or s(point, "unit")
-    ok, unit_code = unit_compatible(actual_unit, measure["standard_unit"])
+    standard_unit = measure["standard_unit"]
+    # 金额族：抽取层保留原文单位（value_text 也是原文），在这里统一换算到标准单位，
+    # 避免 loader 优先解析 value_text 时发生双重换算。
+    if standard_unit in AMOUNT_UNITS:
+        if not actual_unit:
+            issues.append(make_issue(
+                ctx, "reject", "hard", "UNIT_MISSING",
+                f"金额指标 {level3} 缺少单位，无法换算到 {standard_unit}",
+                "检查证据点的 value_text/unit；金额指标不猜单位。",
+                point=point,
+            ))
+            return None, issues
+        factor = amount_factor(actual_unit, standard_unit)
+        if factor is None:
+            issues.append(make_issue(
+                ctx, "reject", "hard", "UNIT_MISMATCH",
+                f"单位 {actual_unit!r} 不是金额单位，无法换算到 {standard_unit!r}",
+                point=point,
+            ))
+            return None, issues
+        parsed.num = parsed.num * factor
+        actual_unit = standard_unit
+
+    ok, unit_code = unit_compatible(actual_unit, standard_unit)
     assumed_unit = (unit_code == "UNIT_ASSUMED")
     if not ok:
         issues.append(make_issue(
             ctx, "reject", "hard", unit_code or "UNIT_MISMATCH",
             f"单位 {actual_unit!r} 与标准单位 {measure['standard_unit']!r} 不兼容",
-            "A103 应为 %；A101 的“个”可能是“工作日”假阳性，需核实原文。",
+            f"检查原文单位与 dim_index_measure.standard_unit；"
+            f"金额族会在 loader 内换算，{level3} 的标准单位是 {measure['standard_unit']}。",
             point=point,
         ))
         return None, issues
@@ -1535,6 +1624,15 @@ def evaluate_row(row: Any, ctx: dict[str, Any]) -> tuple[dict[str, Any] | None, 
         ))
     vmin = parse_float(s(row, "value_min"))
     vmax = parse_float(s(row, "value_max"))
+    # 金额族：resolved 的 value_min/max 是证据级原单位，比较前先换算到标准单位。
+    if measure["standard_unit"] in AMOUNT_UNITS:
+        factor = amount_factor(s(point, "unit") or parsed.unit,
+                               measure["standard_unit"])
+        if factor is not None:
+            if vmin is not None:
+                vmin *= factor
+            if vmax is not None:
+                vmax *= factor
     if vmin is not None and vmax is not None and not (vmin <= parsed.num <= vmax):
         issues.append(make_issue(
             ctx, "warn", "soft", "RANGE_INCONSISTENT",
@@ -1712,7 +1810,7 @@ def write_reports(
     quality_counter = Counter(str(r.get("data_quality", "")) for r in records)
 
     lines: list[str] = []
-    lines.append("# 科技金融 CSV → MySQL 入库报告")
+    lines.append(f"# {cfg.TOPIC_LABEL} · CSV → MySQL 入库报告")
     lines.append("")
     lines.append(f"- 时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     lines.append(f"- loader 版本：`{LOADER_VERSION}`")
@@ -1815,8 +1913,9 @@ def write_reports(
     lines.append("## 9. 重要提示")
     lines.append("")
     lines.append("- `agreement=True` 不代表有可用主值；空值仍按 `EMPTY_VALUE` 跳过。")
-    lines.append("- A103 默认阻断：A103 证据点通常为 `count/家`，与 `share/%` 定义不符。")
-    lines.append("- 单位存实际观测单位，不做跨单位换算；`value_text` 保留原文。")
+    lines.append("- 被 `--block-level3` 阻断的指标不会入库；默认 A103 仅为防御性设置。")
+    lines.append("- 金额族（元/万元/亿元/万亿元）会换算到 `dim_index_measure.standard_unit`；"
+                 "其他单位存实际观测单位；`value_text` 保留原文。")
     lines.append("- `fact_index_value` 唯一键为 `(region_code, year, level3_code, measure_code, context_type)`，重复执行是幂等的。")
     (report_dir / "load_report.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
@@ -2116,6 +2215,15 @@ def self_test() -> int:
     check("家 与 家 兼容", unit_compatible("家", "家")[0])
     check("家 与 % 不兼容", not unit_compatible("家", "%")[0])
     check("空单位 + % → PERCENT_UNIT_MISSING", unit_compatible("", "%") == (False, "PERCENT_UNIT_MISSING"))
+    check("空单位金额 → UNIT_MISSING", unit_compatible("", "万元") == (False, "UNIT_MISSING"))
+    check("个 与 个/万人 按密度接收", unit_compatible("个", "个/万人") == (True, "UNIT_ASSUMED"))
+    check("亿元 → 万元换算",
+          abs(convert_amount_to_standard(1.2, "亿元", "万元") - 12000) < 1e-6)
+    check("万元 → 亿元换算",
+          abs(convert_amount_to_standard(5000, "万元", "亿元") - 0.5) < 1e-9)
+    check("同单位不换算",
+          abs(convert_amount_to_standard(1.2, "亿元", "亿元") - 1.2) < 1e-9)
+    check("A302 是存量指标", "A302" in STOCK_INDICATORS)
 
     check("chosen actual", parse_chosen_context("取实际口径(官方)→actual")[0] == "actual")
     check("chosen planned", parse_chosen_context("无实际口径，仅 planned/target/decline→planned")[0] == "planned")
@@ -2154,13 +2262,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     inp.add_argument("--input-dir", default=None, help="输入根或单个运行目录；默认 data 数据根")
     inp.add_argument("--input-file", action="append", default=None, help="显式指定 points_resolved.csv，可重复")
     inp.add_argument("--all-runs", action="store_true", help="合并所有运行目录的 points_resolved.csv")
-    inp.add_argument("--points-file", default=None, help="证据级 CSV；默认自动查找 points_delta.csv / techfin_a101_points.csv")
+    inp.add_argument("--points-file", default=None,
+                     help=f"证据级 CSV；默认自动查找 points_delta.csv / {cfg.POINTS_ACCUMULATOR}")
     inp.add_argument("--curated-file", default=None, help="文章级 CSV；默认 curated_corpus.csv")
     inp.add_argument("--output-dir", default=None, help="覆盖流水线数据根（topic_config.DATA_ROOT）")
     inp.add_argument("--limit", type=int, default=None, help="最多处理 N 行，便于试跑")
 
     policy = parser.add_argument_group("过滤策略")
-    policy.add_argument("--only-level3", default=None, help="只处理指定三级指标，逗号分隔，如 A101,A102")
+    policy.add_argument("--only-level3", default=None,
+                        help="只处理指定三级指标，逗号分隔，如 A201,A202,A203,A204")
     policy.add_argument("--province-code", default=None, help="只处理指定省，如 440000")
     policy.add_argument("--block-level3", default=DEFAULT_BLOCK_LEVEL3,
                         help="阻断的三级指标，逗号分隔；默认 A103")
@@ -2179,6 +2289,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         help="允许 dim_index.status 非 active（retired/draft）的指标入库（默认拒绝）")
     policy.add_argument("--allow-unverified-evidence", action="store_true",
                         help="允许 evidence_verified=0 的 LLM 数据点入库（默认拒绝）")
+    policy.add_argument("--allow-county-not-applicable", action="store_true",
+                        help="允许 dim_index.is_county_applicable=0 的指标写入县级行"
+                             "（县域替代口径，默认拒绝）")
 
     run = parser.add_argument_group("运行")
     run.add_argument("--dry-run", action="store_true", help="只校验和出报告，不写库")

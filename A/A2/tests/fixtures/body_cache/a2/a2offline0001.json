@@ -1,0 +1,17 @@
+{
+  "article_id": "a2offline0001",
+  "meta": {
+    "url": "https://example.gov.cn/a2-demo",
+    "title": "荔湾区2024年金融运行情况",
+    "source": "荔湾区统计局",
+    "date": "2025-06-01",
+    "kind": "official",
+    "region_code": "440103",
+    "region_name": "荔湾区",
+    "quality_grade": "1"
+  },
+  "final_url": "https://example.gov.cn/a2-demo",
+  "page_type": "html",
+  "body_text": "2024年末，荔湾区金融机构本外币各项存款余额达1234.5亿元，比年初增长8.5%。全区私募基金管理人25家，管理基金规模320亿元。每万人拥有银行网点3.2个。",
+  "attachments": []
+}
