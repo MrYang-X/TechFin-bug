@@ -22,10 +22,12 @@ TechFin-bug.py / techfin_authoritative.py → techfin_fetch_body.py → techfin_
   python run_all.py --collect           # 先跑两个采集器，再跑处理链
   python run_all.py --only clean extract
   python run_all.py --skip ocr --limit 5
+  python run_all.py --only extract verify --allow-rule-fallback   # 无 LLM 凭据时纯规则跑通
   python run_all.py --list              # 只打印将按序执行的步骤
 """
 
 import argparse
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -68,6 +70,11 @@ def parse_args(argv=None):
     ap.add_argument("--list", action="store_true", help="只打印将按序执行的步骤，不执行")
     ap.add_argument("--no-prompt", action="store_true",
                     help="无参数时也跳过交互菜单，直接跑默认处理链（脚本/CI 用）")
+    # 以下两项只透传给「数值抽取」步；其它步不识别这些参数。
+    ap.add_argument("--extractor", choices=["rule", "hybrid"],
+                    help="透传给数值抽取步：rule=只跑规则层；hybrid=规则+LLM（默认）")
+    ap.add_argument("--allow-rule-fallback", action="store_true",
+                    help="透传给数值抽取步：LLM 全部失败时降级为规则层（退出码 0）")
     # 说明：--no-prompt 无需专门的运行时分支——它出现时 argv 非空，天然绕过菜单。
     return ap.parse_args(argv)
 
@@ -177,6 +184,18 @@ def main(argv=None):
         extra = "  [--limit N]" if (args.limit and s["limit"]) else ""
         print(f"  · {s['label']:16s} → {s['script']}{extra}")
     print("=" * 60)
+    if any(s["key"] == "extract" for s in steps):
+        has_key = bool(os.environ.get("ANTHROPIC_API_KEY")
+                       or os.environ.get("ANTHROPIC_AUTH_TOKEN"))
+        if args.extractor == "rule":
+            print("[提示] --extractor rule：本次抽取只跑规则层，不调用 LLM。")
+        elif not has_key:
+            print("[提示] 未检测到 ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN，"
+                  "抽取的 LLM 层不可用。")
+            print("       可加 --allow-rule-fallback 或 --extractor rule "
+                  "以纯规则跑通（退出码 0）。")
+        elif args.allow_rule_fallback:
+            print("[提示] --allow-rule-fallback：LLM 全部失败时按纯规则继续，退出码 0。")
     if args.list:
         return 0
 
@@ -184,6 +203,11 @@ def main(argv=None):
         cmd = [sys.executable, str(TOPIC_DIR / s["script"]), "--output-dir", str(out_root)]
         if args.limit and s["limit"]:
             cmd += ["--limit", str(args.limit)]
+        if s["key"] == "extract":
+            if args.extractor:
+                cmd += ["--extractor", args.extractor]
+            if args.allow_rule_fallback:
+                cmd += ["--allow-rule-fallback"]
         print(f"\n######## [{i}/{len(steps)}] {s['label']} ########")
         print("$ " + " ".join(cmd))
         try:

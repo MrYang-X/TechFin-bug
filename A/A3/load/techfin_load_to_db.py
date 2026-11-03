@@ -157,6 +157,12 @@ STOCK_INDICATORS = {
     "C202", "C301", "D102", "D201", "D202",
 }
 
+# A103 待人工复核的统一提示（写入 load_log / load_report.md 5.1）。
+A103_REVIEW_SUGGESTION = (
+    "请人工检查该 A103 数据；如为 R&D 经费/GDP 的原始量，"
+    "请手动计算比值（%）后再入库。"
+)
+
 AUTHORITY_MAP = {
     "官方": "official", "official": "official",
     "媒体": "media", "media": "media",
@@ -271,6 +277,8 @@ class LoadStats:
     db_errors: int = 0
     hard_rejects: int = 0
     truncated_fields: dict[str, int] = field(default_factory=dict)
+    # A103 待人工复核（整数/非 %/越界等）：不写库，仅 load_log + load_report.md 5.1。
+    a103_manual_review: list[dict] = field(default_factory=list)
 
 
 @dataclass
@@ -288,6 +296,9 @@ class ParsedValue:
     approx: bool
     tail: str
     raw: str
+    # 原文数字串是否带小数点（"5.0"/"5.5" 为 True，"5" 为 False）。
+    # 用于 A103 的整数/浮点分流；注意与 num.is_integer() 不同："5.0" 视为浮点。
+    is_decimal: bool = False
 
 
 @dataclass
@@ -431,8 +442,10 @@ def parse_value_text(text: str) -> ParsedValue | None:
     m = VALUE_RE.match(raw)
     if not m:
         return None
+    num_text = m.group("num")
+    is_decimal = "." in num_text
     try:
-        num = float(m.group("num").replace(",", ""))
+        num = float(num_text.replace(",", ""))
     except ValueError:
         return None
     rest = m.group("rest").strip()
@@ -471,7 +484,8 @@ def parse_value_text(text: str) -> ParsedValue | None:
                 unit = candidate
                 break
     tail = rest[len(unit):] if unit and rest.startswith(unit) else rest
-    return ParsedValue(num * mag, normalize_unit(unit), approx, tail, str(text))
+    return ParsedValue(num * mag, normalize_unit(unit), approx, tail, str(text),
+                       is_decimal=is_decimal)
 
 
 def parse_value(value_text: str, canonical_value: str, evidence_unit: str) -> ParsedValue | None:
@@ -484,6 +498,43 @@ def parse_value(value_text: str, canonical_value: str, evidence_unit: str) -> Pa
             if not parsed.unit and evidence_unit:
                 parsed.unit = normalize_unit(evidence_unit)
             return parsed
+    return None
+
+
+def a103_review_reason(level3: str, metric: str, parsed: ParsedValue | None,
+                       actual_unit: str) -> tuple[str, str] | None:
+    """
+    A103 入库分流：返回 (error_code, detail) 表示不写库、转入待人工复核；
+    返回 None 表示放行（仅当单位是 % 且值在 0—100）。
+
+    - metric != share：count/amount 等非比重口径；
+    - 非 % 单位：按原文数字串是否带小数点区分整数/浮点；
+    - % 但值越界：可能是笔误/口径问题，也进入待复核。
+    """
+    if level3 != "A103":
+        return None
+    if parsed is None:
+        return None
+    if metric and metric != "share":
+        return (
+            "A103_NON_SHARE_MANUAL_RATIO",
+            f"A103 的 metric={metric}，不是 share；原文 {parsed.raw!r}",
+        )
+    if normalize_unit(actual_unit) != "%":
+        if parsed.is_decimal:
+            return (
+                "A103_FLOAT_MANUAL_RATIO",
+                f"A103 的浮点数数据 {parsed.raw!r} 不是百分比",
+            )
+        return (
+            "A103_INTEGER_MANUAL_RATIO",
+            f"A103 的整数数据 {parsed.raw!r} 不是百分比",
+        )
+    if not (0 <= parsed.num <= 100):
+        return (
+            "A103_OUT_OF_RANGE_MANUAL_RATIO",
+            f"A103 百分比值 {parsed.num:g}% 不在 0—100（可能是原文笔误/口径问题）",
+        )
     return None
 
 
@@ -1098,6 +1149,29 @@ def make_issue(
     )
 
 
+def record_a103_review(ctx: dict[str, Any], code: str, detail: str,
+                       point: dict[str, Any] | None = None) -> None:
+    """把 A103 待复核行写入共享的 LoadStats（报告 5.1 与 load_log 使用）。"""
+    stats = ctx.get("load_stats")
+    if stats is None:
+        return
+    row = ctx["row"]
+    stats.a103_manual_review.append({
+        "row_no": ctx.get("row_no", ""),
+        "region_code": s(row, "region_code"),
+        "region_name": s(row, "region_name"),
+        "level3_code": s(row, "level3_code"),
+        "year": s(row, "stat_year"),
+        "metric": s(row, "metric"),
+        "canonical_value": s(row, "canonical_value"),
+        "value_text": s(point, "value_text") if point else s(row, "canonical_value"),
+        "unit": s(point, "unit") if point else "",
+        "evidence_snippet": (s(point, "evidence_snippet") if point else "")[:200],
+        "reason": code,
+        "detail": detail,
+    })
+
+
 def build_remark(
     row: Any,
     point: dict[str, Any] | None,
@@ -1347,6 +1421,18 @@ def evaluate_row(row: Any, ctx: dict[str, Any]) -> tuple[dict[str, Any] | None, 
             ctx, "reject", "hard", "YEAR_INVALID", f"stat_year={stat_year!r}"))
         return None, issues
 
+    # 3.6) A103 非 share 口径：不查 dim_index_measure，直接转入待人工复核。
+    #      A103 只应入库 share/%；count/amount 等多为原始量，需人工计算比值。
+    if level3 == "A103" and metric and metric != "share":
+        detail = (f"A103 的 metric={metric}，不是 share；"
+                  f"canonical_value={canonical or '（空）'}")
+        issues.append(make_issue(
+            ctx, "skip", "policy", "A103_NON_SHARE_MANUAL_RATIO", detail,
+            A103_REVIEW_SUGGESTION,
+        ))
+        record_a103_review(ctx, "A103_NON_SHARE_MANUAL_RATIO", detail)
+        return None, issues
+
     # 4) 口径
     measure = None
     if metric:
@@ -1431,6 +1517,19 @@ def evaluate_row(row: Any, ctx: dict[str, Any]) -> tuple[dict[str, Any] | None, 
         return None, issues
 
     actual_unit = parsed.unit or s(point, "unit")
+
+    # 8.1) A103 分流：只有 % 且 0—100 的 A103 才允许入库；
+    #      非 %（整数/浮点）、metric!=share、% 越界都进入待人工复核。
+    review = a103_review_reason(level3, metric, parsed, actual_unit)
+    if review:
+        code, detail = review
+        issues.append(make_issue(
+            ctx, "skip", "policy", code, detail,
+            A103_REVIEW_SUGGESTION, point=point,
+        ))
+        record_a103_review(ctx, code, detail, point=point)
+        return None, issues
+
     standard_unit = measure["standard_unit"]
     # 金额族：抽取层保留原文单位（value_text 也是原文），在这里统一换算到标准单位，
     # 避免 loader 优先解析 value_text 时发生双重换算。
@@ -1879,6 +1978,31 @@ def write_reports(
     else:
         lines.append("无。")
     lines.append("")
+    lines.append("## 5.1 A103 待人工复核")
+    lines.append("")
+    a103_reviews = getattr(stats, "a103_manual_review", [])
+    if a103_reviews:
+        lines.append("| 行 | 地区 | 年份 | 数值 | 单位 | 原因 | 证据 |")
+        lines.append("|---|---|---:|---|---|---|---|")
+        for r in a103_reviews[:200]:
+            ev = (str(r.get("evidence_snippet", "") or "")
+                  .replace("|", "/").replace("\n", " ")[:80])
+            region = str(r.get("region_name", "") or r.get("region_code", "") or "")
+            value_text = str(r.get("value_text", "") or "").replace("|", "/")
+            lines.append(
+                f"| {r.get('row_no','')} | {region} | {r.get('year','')} "
+                f"| {value_text} | {r.get('unit','')} | `{r.get('reason','')}` | {ev} |"
+            )
+        if len(a103_reviews) > 200:
+            lines.append(f"| … | | | | | | 其余 {len(a103_reviews) - 200} 条见 `load_errors.csv` |")
+        lines.append("")
+        lines.append(
+            f"> 共 {len(a103_reviews)} 条 A103 未写入 `fact_index_value`。"
+            "请人工检查；如为 R&D 经费/GDP 的原始量，请手动计算比值（%）后再入库。"
+        )
+    else:
+        lines.append("无。")
+    lines.append("")
     lines.append("## 6. 分布")
     lines.append("")
     lines.append(f"- 指标：{dict(level3_counter)}")
@@ -1913,7 +2037,9 @@ def write_reports(
     lines.append("## 9. 重要提示")
     lines.append("")
     lines.append("- `agreement=True` 不代表有可用主值；空值仍按 `EMPTY_VALUE` 跳过。")
-    lines.append("- 被 `--block-level3` 阻断的指标不会入库；默认 A103 仅为防御性设置。")
+    lines.append("- 被 `--block-level3` 显式阻断的指标不会入库。")
+    lines.append("- A103 不再默认阻断：只有单位是 `%` 且值在 0—100 的 A103 会入库；"
+                 "非 % 整数/浮点、`metric!=share`、% 越界都会进入 `load_log` 与本报告 5.1 节待人工复核。")
     lines.append("- 金额族（元/万元/亿元/万亿元）会换算到 `dim_index_measure.standard_unit`；"
                  "其他单位存实际观测单位；`value_text` 保留原文。")
     lines.append("- `fact_index_value` 唯一键为 `(region_code, year, level3_code, measure_code, context_type)`，重复执行是幂等的。")
@@ -1932,6 +2058,10 @@ def write_load_manifest(
 ) -> None:
     """写 load_manifest.json：输入指纹、参数快照、目标库与漏斗统计（不含密码）。"""
     try:
+        stats_payload = asdict(stats)
+        # 待复核明细只进报告，不把整张表塞进 manifest；manifest 只留计数。
+        stats_payload["a103_manual_review_count"] = len(
+            stats_payload.pop("a103_manual_review", []) or [])
         payload = {
             "schema_version": 1,
             "loader_version": LOADER_VERSION,
@@ -1966,7 +2096,7 @@ def write_load_manifest(
                 "primary": len(dims.primary) if dims else 0,
                 "channels": len(dims.channels) if dims else 0,
             },
-            "stats": asdict(stats),
+            "stats": stats_payload,
             "write_stats": asdict(write_stats),
         }
         write_json_atomic(Path(report_dir) / "load_manifest.json", payload)
@@ -2121,6 +2251,15 @@ def _run_once(args: argparse.Namespace, state: dict[str, Any]) -> int:
                         "已隔离该行；请检查原始 CSV 字段格式。",
                     )]
                 issues.extend(row_issues)
+                # A103 待复核：逐行写入 load_log（run_logging 会把 stdout 同步落盘）。
+                for issue in row_issues:
+                    if issue.code.startswith("A103_"):
+                        snippet = (issue.evidence_snippet or "").replace("\n", " ")[:120]
+                        print(f"[A103 待复核] 行 {issue.row_no} "
+                              f"{issue.region_name or issue.region_code} "
+                              f"{issue.stat_year}：{issue.detail}"
+                              + (f"；证据：{snippet}" if snippet else ""))
+                        print(f"               {issue.suggestion or A103_REVIEW_SUGGESTION}")
                 reject = any(i.action == "reject" for i in row_issues)
                 skip = any(i.action == "skip" for i in row_issues)
                 if any(i.action == "warn" for i in row_issues):
@@ -2210,6 +2349,34 @@ def self_test() -> int:
     check("1.2亿元 → 1.2/亿元", p is not None and p.num == 1.2 and p.unit == "亿元")
     p = parse_value_text("10个工作日")
     check("10个工作日 → 10/个 + tail 工作日", p is not None and p.num == 10 and p.unit == "个" and p.tail.startswith("工作日"))
+    p = parse_value_text("5%")
+    check("5% → 整数（无小数点）", p is not None and p.is_decimal is False)
+    p = parse_value_text("5.0%")
+    check("5.0% → 浮点（有小数点）", p is not None and p.is_decimal is True)
+    p = parse_value_text("5.5")
+    check("5.5 → 浮点", p is not None and p.is_decimal is True)
+    p = parse_value_text("500亿元")
+    check("500亿元 → 整数", p is not None and p.is_decimal is False)
+
+    check("A103 5% 放行",
+          a103_review_reason("A103", "share", parse_value_text("5%"), "%") is None)
+    check("A103 5.5% 放行",
+          a103_review_reason("A103", "share", parse_value_text("5.5%"), "%") is None)
+    check("A103 5 整数待复核",
+          (a103_review_reason("A103", "share", parse_value_text("5"), "") or ("",))[0]
+          == "A103_INTEGER_MANUAL_RATIO")
+    check("A103 5.5亿元 浮点待复核",
+          (a103_review_reason("A103", "share", parse_value_text("5.5亿元"), "亿元") or ("",))[0]
+          == "A103_FLOAT_MANUAL_RATIO")
+    check("A103 500亿元 整数待复核",
+          (a103_review_reason("A103", "share", parse_value_text("500亿元"), "亿元") or ("",))[0]
+          == "A103_INTEGER_MANUAL_RATIO")
+    check("A103 metric=count 待复核",
+          (a103_review_reason("A103", "count", parse_value_text("5"), "") or ("",))[0]
+          == "A103_NON_SHARE_MANUAL_RATIO")
+    check("A103 105% 越界待复核",
+          (a103_review_reason("A103", "share", parse_value_text("105%"), "%") or ("",))[0]
+          == "A103_OUT_OF_RANGE_MANUAL_RATIO")
 
     check("A101 个 与 家 不兼容", unit_compatible("个", "家") == (False, "UNIT_WEAK"))
     check("家 与 家 兼容", unit_compatible("家", "家")[0])

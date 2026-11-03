@@ -34,6 +34,8 @@ import crawler_common as cc  # noqa: E402
 # noinspection PyUnresolvedReferences
 import region_rules as rr  # noqa: E402
 # noinspection PyUnresolvedReferences
+import topic_config as cfg  # noqa: E402
+# noinspection PyUnresolvedReferences
 import techfin_extract_points as ep  # noqa: E402
 # noinspection PyUnresolvedReferences
 import techfin_load_to_db as loader  # noqa: E402
@@ -216,6 +218,128 @@ def test_loader_gates() -> None:
           == ["EMPTY_VALUE_MISSING"])
 
 
+def test_a103_loader_policy() -> None:
+    print("[A103] A103 入库策略")
+
+    def dims():
+        m = {"level3_code": "A103", "measure_code": "share",
+             "standard_unit": "%", "value_kind": "numeric", "is_primary": 1}
+        return loader.Dims(
+            regions={"440103": {"region_code": "440103", "region_name": "荔湾区",
+                                "region_level": 3, "is_active": 1,
+                                "province_code": "440000"}},
+            measures={("A103", "share"): m}, primary={"A103": m},
+            channels={"news_corpus": {"default_quality": 3}},
+            indexes={"A103": {"status": "active", "is_county_applicable": 1}},
+            other_county_names={}, region_names={"440103": {"荔湾区", "荔湾"}},
+        )
+
+    def args(**kw):
+        base = dict(
+            only_level3=set(), province_code=None, block_level3=set(),
+            allow_inactive_index=False, include_non_actual=False,
+            include_missing=False, allow_region_query=False,
+            allow_breakdown=False, allow_partial_batch=True,
+            allow_approx=True, allow_low_confidence_year=True,
+            allow_unverified_evidence=False, allow_county_not_applicable=False,
+        )
+        base.update(kw)
+        return SimpleNamespace(**base)
+
+    def row(**kw):
+        base = {
+            "region_code": "440103", "region_name": "荔湾区", "city_name": "广州市",
+            "level3_code": "A103", "level3_name": "R&D经费支出占GDP比重",
+            "metric": "share", "stat_year": "2023", "stat_year_src": "text",
+            "canonical_value": "5.2", "n_sources": "1", "n_support": "1",
+            "source_article_ids": "a1", "value_min": "5.2", "value_max": "5.2",
+            "agreement": "False", "chosen_reason": "取实际口径(官方)→actual",
+            "authority": "官方", "data_quality": "1",
+            "data_source": "新闻语料抽取（1 篇）", "region_from": "text",
+            "region_confidence": "0.9", "year_confidence": "0.9",
+            "aggregation_type": "total",
+        }
+        base.update(kw)
+        return pd.Series(base)
+
+    def point(**kw):
+        base = {
+            "point_id": "p1", "article_id": "a1", "level3_code": "A103",
+            "region_code": "440103", "stat_year": "2023", "metric": "share",
+            "value_num": "5.2", "value_text": "5.2%", "unit": "%",
+            "context_type": "actual",
+            "evidence_snippet": "R&D经费支出占GDP比重为5.2%",
+            "publish_date": "2024-06-01", "authority": "官方",
+            "quality_grade": "1", "confidence": "0.9", "title": "荔湾区统计公报",
+            "year_confidence": "0.9", "region_from": "text",
+            "aggregation_type": "total", "extract_method": "rule",
+            "evidence_verified": "1",
+        }
+        base.update(kw)
+        return base
+
+    def run(r, p):
+        stats = loader.LoadStats()
+        ctx = {"row": r, "row_no": 1, "input_file": "x", "run_dir": "",
+               "args": args(), "dims": dims(), "points": {"a1": [p]},
+               "curated": {}, "load_stats": stats}
+        rec, issues = loader.evaluate_row(r, ctx)
+        return rec, issues, stats
+
+    check("A103 默认不阻断",
+          loader.DEFAULT_BLOCK_LEVEL3 == "" and cfg.BLOCK_LEVEL3 == "")
+
+    def code(value, metric="share", unit=""):
+        parsed = loader.parse_value_text(value)
+        reason = loader.a103_review_reason("A103", metric, parsed, unit)
+        return reason[0] if reason else ""
+
+    check("5% 放行", code("5%", unit="%") == "")
+    check("5.5% 放行", code("5.5%", unit="%") == "")
+    check("5 整数待复核", code("5") == "A103_INTEGER_MANUAL_RATIO")
+    check("5.5 浮点待复核", code("5.5") == "A103_FLOAT_MANUAL_RATIO")
+    check("500亿元 整数待复核", code("500亿元", unit="亿元") == "A103_INTEGER_MANUAL_RATIO")
+    check("5.5亿元 浮点待复核", code("5.5亿元", unit="亿元") == "A103_FLOAT_MANUAL_RATIO")
+    check("metric=count 待复核", code("5", metric="count") == "A103_NON_SHARE_MANUAL_RATIO")
+    check("105% 越界待复核", code("105%", unit="%") == "A103_OUT_OF_RANGE_MANUAL_RATIO")
+    check("非 A103 不受影响",
+          loader.a103_review_reason("A101", "count",
+                                    loader.parse_value_text("5"), "") is None)
+
+    rec, issues, stats = run(row(), point())
+    check("A103 5.2% 入库",
+          rec is not None and rec.get("measure_code") == "share"
+          and abs(float(rec.get("value_num", 0)) - 5.2) < 1e-9,
+          str([i.code for i in issues]))
+
+    rec, issues, stats = run(
+        row(canonical_value="5"),
+        point(value_num="5", value_text="5", unit="家",
+              evidence_snippet="R&D经费500亿元"),
+    )
+    check("A103 整数非% 待复核",
+          rec is None and any(i.code == "A103_INTEGER_MANUAL_RATIO" for i in issues),
+          str([i.code for i in issues]))
+    check("待复核写入 LoadStats", len(stats.a103_manual_review) == 1,
+          str(stats.a103_manual_review))
+
+    rec, issues, stats = run(
+        row(metric="count", canonical_value="5"),
+        point(metric="count", value_num="5", value_text="5", unit="家"),
+    )
+    check("A103 metric=count 待复核",
+          rec is None and any(i.code == "A103_NON_SHARE_MANUAL_RATIO" for i in issues),
+          str([i.code for i in issues]))
+
+    rec, issues, stats = run(
+        row(canonical_value="105"),
+        point(value_num="105", value_text="105%", unit="%"),
+    )
+    check("A103 105% 越界待复核",
+          rec is None and any(i.code == "A103_OUT_OF_RANGE_MANUAL_RATIO" for i in issues),
+          str([i.code for i in issues]))
+
+
 def test_stat_year_normalization() -> None:
     print("[7] stat_year 落盘格式归一化")
     check("None → 空串", ep._normalize_year(None) == "", str(ep._normalize_year(None)))
@@ -239,6 +363,25 @@ def test_stat_year_normalization() -> None:
           all(v == "" or isinstance(v, int) for v in years), str(years))
 
 
+def test_llm_json_parse() -> None:
+    print("[8] LLM 返回 JSON 解析兼容性")
+    check("纯 JSON", ep._parse_json_text('{"data_points": []}') == {"data_points": []})
+    fenced = '```json\n{"data_points": [{"value": 1}]}\n```'
+    check("代码块围栏", ep._parse_json_text(fenced)["data_points"][0]["value"] == 1)
+    with_text = '结果如下：\n{"data_points": [{"value": 2}]}\n以上。'
+    check("前后带说明文字",
+          ep._parse_json_text(with_text)["data_points"][0]["value"] == 2)
+    check("裸数组包装",
+          ep._parse_json_text('[{"value": 3}]')["data_points"][0]["value"] == 3)
+    try:
+        ep._parse_json_text("不是 JSON")
+        raised = False
+    except ValueError:
+        raised = True
+    check("非法文本抛 ValueError", raised)
+    check("空文本返回空点", ep._parse_json_text("") == {"data_points": []})
+
+
 def main() -> int:
     test_a103_forced_to_a101()
     test_clause_binding()
@@ -246,7 +389,9 @@ def main() -> int:
     test_relevance_and_title()
     test_loader_helpers()
     test_loader_gates()
+    test_a103_loader_policy()
     test_stat_year_normalization()
+    test_llm_json_parse()
     print("\n" + "=" * 50)
     if FAILS:
         print(f"[失败] {len(FAILS)} 项：{FAILS}")

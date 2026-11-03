@@ -14,10 +14,11 @@ TOPIC_LABEL = "科技金融指数研究"
 # 命令行默认采集的二级指标（采集器 --level2 的默认值；复制到其他主题后改这里即可）。
 DEFAULT_LEVEL2 = ["A1"]
 
-# 入库默认阻断的指标（防御性策略；A2/A3 正常不会产出 A103，但可防止误指向 A1 数据根）。
-BLOCK_LEVEL3 = "A103"
+# 入库默认阻断的指标（默认空：A103 不再默认阻断）。
+# A103 只有 unit=% 且 0—100 才入库；非 %/越界由 loader 转入 load_log 与报告 5.1 待复核。
+BLOCK_LEVEL3 = ""
 # 交互式入库菜单里允许"放行"的阻断指标（空表示不提供该菜单）。
-BLOCKABLE_LEVEL3 = ["A103"]
+BLOCKABLE_LEVEL3 = []
 
 # ==================== 官方源打标词 ====================
 #
@@ -854,7 +855,7 @@ BODY_PREFIX = "body_"                  # techfin_fetch_body.py 每轮产物前�
 # ---- techfin_extract_points.py 数值数据点产物 ----
 POINTS_ACCUMULATOR = "techfin_a101_points.csv"  # 证据级数据点累积总库（跨轮读写）
 POINTS_PREFIX = "points_"                       # techfin_extract_points.py 每轮产物前缀（points_log / points_delta.csv ...）
-LLM_CACHE_DIR = "a101_llm_cache"                # LLM 结果缓存（key=article_id+prompt_version+model+md5(正文路径)）
+LLM_CACHE_DIR = "a101_llm_cache"                # LLM 结果缓存（key=article_id+prompt_version+model+base_url+md5(正文路径)）
 LLM_CALLS_LOG = "a101_llm_calls.jsonl"          # LLM 调用审计（逐次追加）
 
 # ---- techfin_fetch_body.py 二级抓取的节奏与范围 ----

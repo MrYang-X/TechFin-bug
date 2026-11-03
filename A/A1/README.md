@@ -200,7 +200,7 @@ python load/techfin_load_to_db.py \
 python load/techfin_load_to_db.py --input-dir techfin_common_output/<旧运行目录>  # 读旧产物根
 python load/techfin_load_to_db.py --all-runs --only-level3 A101           # 合并所有轮次/只入 A101
 python load/techfin_load_to_db.py --allow-partial-batch                   # 放行补充公布/更名/搬迁等批次值
-python load/techfin_load_to_db.py --block-level3 A103 --allow-level3 A103 # 调整/放开 A103 阻断
+python load/techfin_load_to_db.py --block-level3 A103   # 显式阻断 A103（默认不阻断；非 %/越界 A103 会自动进待复核）
 python load/techfin_load_to_db.py --self-test                             # 纯函数自测
 python load/techfin_load_to_db.py --dump-mapping                          # 查看指标口径/单位映射
 python load/techfin_load_to_db_interactive.py                             # 交互式菜单（默认预演）
@@ -410,6 +410,36 @@ A/A1/
 可按需安装，缺哪个就降级：trafilatura→bs4、PDF/xlsx/xls→跳过并标记；缺 `anthropic` 时
 `--extractor rule` 纯规则模式可离线跑完全流程。docx 由标准库 `zipfile` 解析，不依赖 `python-docx`。
 
+**LLM 凭据**：`--extractor hybrid`（默认）需要 Anthropic 凭据，SDK 读取环境变量
+`ANTHROPIC_API_KEY`，或 `ANTHROPIC_AUTH_TOKEN` 配合 `ANTHROPIC_BASE_URL`。凭据缺失时抽取会在
+启动阶段打印提示并以退出码 3 结束（`run_all.py` 随后中止后续步骤）；只需规则层时加
+`--allow-rule-fallback` 或 `--extractor rule` 即可跑通全流程（退出码 0）。
+
+**接入第三方 Anthropic 兼容端点**：抽取层支持用环境变量切换模型与端点，端点/模型名以各厂商
+最新文档为准：
+
+| 变量 | 作用 |
+|---|---|
+| `ANTHROPIC_AUTH_TOKEN` | 第三方 API Key（SDK 以 `Authorization: Bearer` 发送） |
+| `TECHFIN_LLM_BASE_URL` | 厂商的 Anthropic 兼容端点 |
+| `TECHFIN_LLM_MODEL` | 厂商模型名 |
+| `TECHFIN_LLM_STRUCTURED` | `0` = 省略 `output_config`，改由提示词约束 JSON（第三方通常要设 0） |
+| `TECHFIN_LLM_PROMPT_CACHE` | `0` = 不发送 `cache_control`（第三方通常要设 0） |
+
+示例（占位）：
+
+```bash
+ANTHROPIC_AUTH_TOKEN=<你的key>
+TECHFIN_LLM_BASE_URL=https://api.deepseek.com/anthropic
+TECHFIN_LLM_MODEL=deepseek-chat
+TECHFIN_LLM_STRUCTURED=0
+TECHFIN_LLM_PROMPT_CACHE=0
+```
+
+建议先 `--limit 3` 小样本试跑，确认 LLM 调用审计日志（`LLM_CALLS_LOG`）里 `ok=true` 再全量；
+key 只放运行配置/环境变量，不要写进 `config/*.py` 或提交 git。第三方模型不在 `LLM_PRICING`
+表里时，运行报告的成本估算显示 0（不影响抽取）。
+
 ### 多指标抽取契约（A2/A3 复用）
 
 抽取层已按 `config/extract_config.py` 的 `INDICATOR_SCOPE` 通用化，A1 仍只启用
@@ -519,8 +549,11 @@ loader 读取 `dim_index.is_county_applicable`：县级行默认拒绝，需
 **严格过滤（默认）**：
 
 - 只入 `actual` + 有值 + 指标/单位匹配 + 非假阳性 + 地区一致的行；
-- **A103 默认阻断**：A103 证据点通常为 `count/家`，与 `share/%` 定义不符；
-  如未来有合法 A103（`share/%/actual/0—100`），用 `--allow-level3 A103` 显式放开；
+- **A103 入库策略**：不再默认阻断。只有单位是 `%` 且值在 0—100 的 A103 会写入事实表
+  （含 `5%` 这类整数百分比）；非 `%` 的整数/浮点、`metric != share`、`%` 越界均不写库，
+  逐行写入 `load_log`，并在 `load_report.md` 第 5.1 节列出，提示人工检查并手动计算
+  R&D 经费/GDP 比值。采集/清洗阶段保留全部证据点；抽取层的 `validate_points` 仍会丢弃
+  A103+count/amount 的非法点，这些点只留在 `points_dropped.csv`。
 - 空值**不写 0**，默认跳过；`--include-missing` 才写 `obs_status='missing'`；
 - `planned/target/decline/unknown` 默认跳过；`--include-non-actual` 才写入；
 - 拒绝“10 个工作日”、服务企业/名单/孵化器假阳性、补充公布/更名/搬迁批次、
@@ -600,7 +633,7 @@ python load/techfin_load_to_db_interactive.py
 > 在 PyCharm 的 **Run 窗口** 中，隐藏密码输入可能不可用；请改用 **Terminal**，
 > 或先设置环境变量 `TECHFIN_DB_PASSWORD`。脚本会在非交互终端自动改用可见输入并给出提示。
 
-> 默认严格模式当前可能是 **0 行写入**——这是数据质量结论（A103 系统性错配、空值、
+> 默认严格模式当前可能是 **0 行写入**——这是数据质量结论（A103 非 %/越界、空值、
 > 假阳性、地区串区），不是脚本故障。先看 `load_report.md` 与 `load_errors.csv` 再决定
 > 是否用 `--allow-*` 放行。
 
@@ -663,7 +696,7 @@ unit / region_code / region_name / indicators` 这几列。**在这之前采的�
 
 ## 离线回归（不联网、不连库）
 
-本次改造附带一个可重复的准确度回归，覆盖 A103 强制、地区锚点、子句级数字绑定、
+本次改造附带一个可重复的准确度回归，覆盖 A103 入库策略、地区锚点、子句级数字绑定、
 拆分口径、短别名阻断、相关性词距、URL 标题回退、loader 辅助函数：
 
 ```bash

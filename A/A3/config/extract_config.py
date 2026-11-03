@@ -8,6 +8,7 @@
 本次范围：只做 A101「高新技术企业数量/密度」。
 """
 
+import os
 import re
 
 # ==================== 指标词族（A3）====================
@@ -148,7 +149,15 @@ AMBIGUOUS_REGION_NAMES = {"城区"}
 # 注意：Sonnet 5.5 **不接受非默认 temperature**（传 temperature=0 会 400），
 # 故本脚本【不设 temperature】，靠结构化输出（output_config.format）保证 JSON 可靠；
 # thinking 省略即默认 adaptive。effort 用 low/medium 控成本（抽取属高频、类分类任务）。
-LLM_MODEL = "claude-sonnet-5-5"
+# 可用环境变量覆盖，便于接入第三方 Anthropic 兼容端点（改配置不改代码）：
+#   TECHFIN_LLM_MODEL         模型名（默认 claude-sonnet-5-5）
+#   TECHFIN_LLM_BASE_URL      Anthropic 兼容端点（留空则用 SDK 的 ANTHROPIC_BASE_URL）
+#   TECHFIN_LLM_STRUCTURED    1=用 output_config（默认）；0=省略，改由提示词约束 JSON
+#   TECHFIN_LLM_PROMPT_CACHE  1=发送 cache_control（默认）；0=system 用纯字符串
+LLM_MODEL = os.environ.get("TECHFIN_LLM_MODEL") or "claude-sonnet-5-5"
+LLM_BASE_URL = os.environ.get("TECHFIN_LLM_BASE_URL", "")
+LLM_USE_STRUCTURED_OUTPUT = os.environ.get("TECHFIN_LLM_STRUCTURED", "1") != "0"
+LLM_USE_PROMPT_CACHE = os.environ.get("TECHFIN_LLM_PROMPT_CACHE", "1") != "0"
 LLM_EFFORT = "medium"
 LLM_MAX_TOKENS = 8000
 PROMPT_VERSION = "a3-v1"        # 改 prompt/规则即 bump

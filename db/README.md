@@ -315,7 +315,9 @@ ON DUPLICATE KEY UPDATE
 原文是“2019 年广州有效期内的高新技术企业有 12099 家”，属于 A101，不是 A103。盲导会得到“A103 = 12099%”。
 
 > 2026-10 起，`extract/techfin_extract_points.py`（抽取层）已强制规则层只产 A101，并做指标-口径-单位一致性校验；
-> 不合格点写入 `points_dropped.csv`。loader 仍保留 `--block-level3 A103` 作为最后一道闸门。
+> 不合格点写入 `points_dropped.csv`。loader 不再默认阻断 A103：只有单位是 `%` 且值在 0—100 的
+> A103 会入库；非 `%` 整数/浮点、`metric != share`、`%` 越界一律不写库，进入 `load_log` 与
+> `load_report.md` 5.1 节待人工复核（提示手动计算 R&D 经费/GDP 比值）。
 
 loader 必须做：
 
@@ -326,8 +328,9 @@ loader 必须做：
 5. CSV 用 `utf-8-sig` 读取（文件带 BOM）；
 6. `points_resolved.csv` 没有 `context_type` 和 `unit`，应以 `points_delta.csv` 为准，或在 loader 中标记 `unknown` 并拒绝进入 `v_index_actual`。
 
-> **已实现 loader**：`A/A1/load/techfin_load_to_db.py`。默认严格模式会阻断 A103、空值、
-> 假阳性和地区串区；先跑 `--dry-run`，查看 `load_report.md` / `load_errors.csv`，再决定是否
+> **已实现 loader**：`A/A1`、`A/A2`、`A/A3` 的 `load/techfin_load_to_db.py`。默认严格模式会跳过
+> 非 `%`/越界的 A103（写入 `load_log` 与报告 5.1 待复核）、空值、假阳性和地区串区；
+> 先跑 `--dry-run`，查看 `load_report.md` / `load_errors.csv`，再决定是否
 > 用 `--allow-partial-batch` / `--include-missing` / `--include-non-actual` 放行。
 > 交互式入口：`A/A1/load/techfin_load_to_db_interactive.py`（菜单式，默认预演）。
 > 详细用法见 [`A/A1/README.md`](../A/A1/README.md) 的「CSV → MySQL 入库」一节。

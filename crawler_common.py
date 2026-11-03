@@ -694,6 +694,24 @@ def merge_with_existing(df, path, accumulate=True):
     return merged
 
 
+def _parse_iso_dates(series):
+    """把 date 列中严格合法的 YYYY-MM-DD 解析为 datetime；空值/非法值跳过。
+
+    用解析后的日期而不是原始字符串比较，避免「2026-1-5」这类非补零写法
+    在字典序下被排到「2026-10-01」之后。
+    """
+    out = []
+    for v in series.fillna("").astype(str):
+        s = v.strip()
+        if not s:
+            continue
+        try:
+            out.append(datetime.strptime(s, "%Y-%m-%d"))
+        except ValueError:
+            continue
+    return out
+
+
 def print_quality_report(df, stats, title="数据质量"):
     """收尾打印数据质量，便于判断语料是否可用于分析"""
     has_date = df["date"].fillna("").astype(str).str.strip().ne("")
@@ -728,8 +746,28 @@ def print_quality_report(df, stats, title="数据质量"):
                         .isin(["true", "1"]).sum())
             print(f"  标题原为URL（已用摘要回退）：{n_url} 条")
         if dated:
-            print(f"  日期范围：{df.loc[has_date, 'date'].min()}"
-                  f" ~ {df.loc[has_date, 'date'].max()}")
+            # 这里统计的是【文章发布日期】的跨度，不是检索参数；累积库里可能混入
+            # 站点写错的未来日期，故从区间中排除并单独告警。
+            now_dt = datetime.now()
+            today = now_dt.strftime("%Y-%m-%d")
+            dates = _parse_iso_dates(df.loc[has_date, "date"])
+            valid = [d for d in dates if d.strftime("%Y-%m-%d") <= today]
+            future = [d for d in dates if d.strftime("%Y-%m-%d") > today]
+            if valid:
+                earliest, latest = min(valid), max(valid)
+                gap = (now_dt - latest).days
+                if gap == 0:
+                    suffix = "（最新一篇为今天）"
+                elif gap > 0:
+                    suffix = f"（最新一篇距今 {gap} 天）"
+                else:
+                    suffix = ""
+                print(f"  文章发布日期：{earliest.strftime('%Y-%m-%d')}"
+                      f" ~ {latest.strftime('%Y-%m-%d')}{suffix}")
+            if future:
+                print(f"  未来日期（晚于今天 {today}）：{len(future)} 条，"
+                      "未计入发布日期范围")
+            print(f"  数据截至：{today}")
 
     if stats.get("per_source"):
         print("  本次各来源：", "，".join(

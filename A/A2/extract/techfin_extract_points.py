@@ -636,7 +636,9 @@ def _system_text():
 
 
 def _cache_key(article_id, rel_text):
-    raw = f"{article_id}|{ec.PROMPT_VERSION}|{ec.LLM_MODEL}|{hashlib.md5(rel_text.encode()).hexdigest()}"
+    # 纳入 base_url：同一模型名在不同厂商端点下不能复用缓存
+    raw = (f"{article_id}|{ec.PROMPT_VERSION}|{ec.LLM_MODEL}|{ec.LLM_BASE_URL}|"
+           f"{hashlib.md5(rel_text.encode()).hexdigest()}")
     return hashlib.md5(raw.encode()).hexdigest()
 
 
@@ -646,6 +648,10 @@ def _llm_error_info(exc):
     status = int(getattr(exc, "status_code", 0) or 0)
     fatal = name in ("AuthenticationError", "PermissionDeniedError",
                      "NotFoundError", "BadRequestError")
+    # SDK 在请求阶段才校验凭据，缺失时抛 TypeError；这是配置错误、重试无用。
+    # 只匹配该消息，避免把代码自身的 TypeError 误判为认证问题。
+    if name == "TypeError" and "Could not resolve authentication method" in str(exc):
+        fatal = True
     retryable = name in ("RateLimitError", "APIConnectionError", "APITimeoutError",
                          "InternalServerError") or (name == "APIStatusError" and status >= 500)
     return name, fatal, retryable, status
@@ -688,11 +694,43 @@ def _estimate_cost(usage):
     )
 
 
+def _parse_json_text(text):
+    """从模型返回文本中提取 JSON（兼容第三方网关的代码块/前后说明）。
+
+    返回 dict；若模型直接返回数组，则包装成 {"data_points": [...]}。
+    无法解析时抛 ValueError，由调用方按 LLM 失败计数。
+    """
+    s = (text or "").strip()
+    if not s:
+        return {"data_points": []}
+    # 去掉 ```json ... ``` 围栏（有的网关会保留围栏）
+    if s.startswith("```"):
+        s = re.sub(r"^```[a-zA-Z0-9_-]*\s*", "", s)
+        s = re.sub(r"\s*```$", "", s).strip()
+    try:
+        data = json.loads(s)
+    except json.JSONDecodeError:
+        # 前后带解释文字时，截取首个 { 到末个 } 的片段再试
+        i, j = s.find("{"), s.rfind("}")
+        if i < 0 or j <= i:
+            raise ValueError("LLM 返回内容不是合法 JSON") from None
+        data = json.loads(s[i:j + 1])
+    if isinstance(data, list):
+        data = {"data_points": data}
+    if not isinstance(data, dict):
+        raise ValueError("LLM 返回的 JSON 不是对象")
+    return data
+
+
 def call_llm(rel_text, meta, client, cache_dir, calls_log):
     """
-    调用 Sonnet 5.5 抽取（结构化输出强约束 JSON）。
+    调用 LLM 抽取（默认 Anthropic 结构化输出，可由环境变量切换到兼容端点）。
     注意：**不传 temperature**——Sonnet 5.5 对非默认 temperature 会返回 400；
     可靠性由 output_config.format 的 JSON schema 保证。结果按 key 缓存、并记审计日志。
+
+    兼容开关（见 config/extract_config.py）：
+    - TECHFIN_LLM_STRUCTURED=0：省略 output_config，改为在 system 里嵌入 schema 并要求纯 JSON；
+    - TECHFIN_LLM_PROMPT_CACHE=0：不发送 cache_control，system 用纯字符串。
 
     返回 (data, meta_info)；meta_info 含 cached/usage/latency_ms/cost_usd/request_id。
     可重试错误（429/5xx/连接/超时）指数退避 3 次；认证/参数错误立即失败。
@@ -709,23 +747,35 @@ def call_llm(rel_text, meta, client, cache_dir, calls_log):
 
     user_text = (f"采集时地区：{meta.get('region_name', '')}（{meta.get('region_code', '')}）\n\n"
                  f"正文相关片段：\n{rel_text}")
+    system_text = _system_text()
+    if not ec.LLM_USE_STRUCTURED_OUTPUT:
+        # 第三方网关通常不支持 output_config，改为提示词强约束 JSON
+        system_text += ("\n\n【输出格式】只输出一个 JSON 对象，不要 Markdown 代码块、"
+                        "不要任何解释文字。必须符合以下 JSON Schema：\n"
+                        + json.dumps(ec.LLM_SCHEMA, ensure_ascii=False))
+    if ec.LLM_USE_PROMPT_CACHE:
+        system_arg = [{"type": "text", "text": system_text,
+                       "cache_control": {"type": "ephemeral"}}]
+    else:
+        system_arg = system_text
+    request = {
+        "model": ec.LLM_MODEL,
+        "max_tokens": ec.LLM_MAX_TOKENS,
+        "system": system_arg,
+        "messages": [{"role": "user", "content": user_text}],
+    }
+    if ec.LLM_USE_STRUCTURED_OUTPUT:
+        request["output_config"] = {
+            "effort": ec.LLM_EFFORT,
+            "format": {"type": "json_schema", "schema": ec.LLM_SCHEMA},
+        }
     resp = None
     last_exc = None
     start = time.perf_counter()
     for attempt in range(3):
         start = time.perf_counter()
         try:
-            resp = client.messages.create(
-                model=ec.LLM_MODEL,
-                max_tokens=ec.LLM_MAX_TOKENS,
-                system=[{"type": "text", "text": _system_text(),
-                         "cache_control": {"type": "ephemeral"}}],
-                messages=[{"role": "user", "content": user_text}],
-                output_config={
-                    "effort": ec.LLM_EFFORT,
-                    "format": {"type": "json_schema", "schema": ec.LLM_SCHEMA},
-                },
-            )
+            resp = client.messages.create(**request)
             break
         except Exception as exc:
             last_exc = exc
@@ -745,7 +795,7 @@ def call_llm(rel_text, meta, client, cache_dir, calls_log):
     latency_ms = int((time.perf_counter() - start) * 1000)
 
     text = next((b.text for b in resp.content if b.type == "text"), "")
-    data = json.loads(text) if text else {"data_points": []}
+    data = _parse_json_text(text)
     data["_model"] = ec.LLM_MODEL
     data["_prompt_version"] = ec.PROMPT_VERSION
     usage = _usage_dict(resp)
@@ -1059,11 +1109,22 @@ def build_llm_client():
               "加 --allow-rule-fallback 可纯规则继续。")
         return None
     try:
-        return anthropic.Anthropic()
+        # 第三方兼容端点通过 TECHFIN_LLM_BASE_URL 指定；留空则用 SDK 默认
+        kwargs = {"base_url": ec.LLM_BASE_URL} if ec.LLM_BASE_URL else {}
+        client = anthropic.Anthropic(**kwargs)
     except Exception as e:
         print(f"[LLM] 无法初始化 Anthropic 客户端（{e}）；hybrid 模式将中止，"
               "加 --allow-rule-fallback 可纯规则继续。")
         return None
+    # SDK 构造时不校验凭据，直到请求才抛 TypeError。这里提前检查，
+    # 避免把配置问题拖成 N 次无效调用后才熔断。
+    if not (getattr(client, "api_key", None) or getattr(client, "auth_token", None)):
+        print("[LLM] 未检测到 Anthropic 凭据，SDK 无法发起请求。")
+        print("       请设置环境变量 ANTHROPIC_API_KEY，或同时设置 "
+              "ANTHROPIC_AUTH_TOKEN 与 ANTHROPIC_BASE_URL。")
+        print("       仅用规则层请加 --extractor rule 或 --allow-rule-fallback。")
+        return None
+    return client
 
 
 def merge_accumulator(delta, path):

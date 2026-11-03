@@ -438,6 +438,36 @@ A/A3/
 可按需安装，缺哪个就降级：trafilatura→bs4、PDF/xlsx/xls→跳过并标记；缺 `anthropic` 时
 `--extractor rule` 纯规则模式可离线跑完全流程。docx 由标准库 `zipfile` 解析，不依赖 `python-docx`。
 
+**LLM 凭据**：`--extractor hybrid`（默认）需要 Anthropic 凭据，SDK 读取环境变量
+`ANTHROPIC_API_KEY`，或 `ANTHROPIC_AUTH_TOKEN` 配合 `ANTHROPIC_BASE_URL`。凭据缺失时抽取会在
+启动阶段打印提示并以退出码 3 结束（`run_all.py` 随后中止后续步骤）；只需规则层时加
+`--allow-rule-fallback` 或 `--extractor rule` 即可跑通全流程（退出码 0）。
+
+**接入第三方 Anthropic 兼容端点**：抽取层支持用环境变量切换模型与端点，端点/模型名以各厂商
+最新文档为准：
+
+| 变量 | 作用 |
+|---|---|
+| `ANTHROPIC_AUTH_TOKEN` | 第三方 API Key（SDK 以 `Authorization: Bearer` 发送） |
+| `TECHFIN_LLM_BASE_URL` | 厂商的 Anthropic 兼容端点 |
+| `TECHFIN_LLM_MODEL` | 厂商模型名 |
+| `TECHFIN_LLM_STRUCTURED` | `0` = 省略 `output_config`，改由提示词约束 JSON（第三方通常要设 0） |
+| `TECHFIN_LLM_PROMPT_CACHE` | `0` = 不发送 `cache_control`（第三方通常要设 0） |
+
+示例（占位）：
+
+```bash
+ANTHROPIC_AUTH_TOKEN=<你的key>
+TECHFIN_LLM_BASE_URL=https://api.deepseek.com/anthropic
+TECHFIN_LLM_MODEL=deepseek-chat
+TECHFIN_LLM_STRUCTURED=0
+TECHFIN_LLM_PROMPT_CACHE=0
+```
+
+建议先 `--limit 3` 小样本试跑，确认 LLM 调用审计日志（`LLM_CALLS_LOG`）里 `ok=true` 再全量；
+key 只放运行配置/环境变量，不要写进 `config/*.py` 或提交 git。第三方模型不在 `LLM_PRICING`
+表里时，运行报告的成本估算显示 0（不影响抽取）。
+
 ### 语料清洗/提纯（`clean/techfin_curate.py`）
 
 纯本地、零请求；把采集语料经漏斗收敛成干净语料：
@@ -525,8 +555,9 @@ A/A3/
 **严格过滤（默认）**：
 
 - 只入 `actual` + 有值 + 指标/单位匹配 + 非假阳性 + 地区一致的行；
-- **默认阻断 A103 仅为防御**：A2/A3 正常不会产出 A103；如误指向 A1 数据根，A103 会被阻断。
-  如确有合法 A103，用 `--allow-level3 A103` 显式放开；
+- **A103 入库策略（三主题一致）**：A103 不再默认阻断。只有单位是 `%` 且值在 0—100 的
+  A103 会入库；非 `%` 整数/浮点、`metric != share`、`%` 越界进入 `load_log` 与
+  `load_report.md` 5.1 节待人工复核。A2/A3 正常不产出 A103，混用数据根时同样适用。
 - 空值**不写 0**，默认跳过；`--include-missing` 才写 `obs_status='missing'`；
 - `planned/target/decline/unknown` 默认跳过；`--include-non-actual` 才写入；
 - 拒绝“10 个工作日”、服务企业/名单/孵化器假阳性、补充公布/更名/搬迁批次、
