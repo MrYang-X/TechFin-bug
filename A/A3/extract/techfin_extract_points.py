@@ -194,6 +194,11 @@ def validate_points(points):
 
 def _metric_of(unit, scope=None):
     """单位 → measure_code；未登记的单位回退到指标默认口径。"""
+    # 增速类指标（如 B102）的源单位也是 %，但 measure_code 是 growth，
+    # 不能走 UNIT_METRIC 的 %→share 默认映射。A 侧没有 growth 指标，行为不变。
+    metrics = set((scope or {}).get("metrics") or ())
+    if metrics == {"growth"} and unit in ec.SHARE_UNITS:
+        return "growth"
     metric = ec.UNIT_METRIC.get(unit, "")
     if metric:
         return metric
