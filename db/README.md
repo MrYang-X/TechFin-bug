@@ -17,7 +17,7 @@
 
 1. **MySQL 中 schema = database**，不能在一个库里再套“省 schema”；按省建 schema 实际是建 31 个数据库。
 2. **宽表格子放不下轻量溯源元数据**：每个值还要记录来源渠道、质量、证据 article_id、来源数量、一致性、最小/最大值；宽表要么为每个指标再加五六列，要么丢失信息。
-3. **年份维度会爆炸**：年份做成列是 35 × 6 = 210 列起；按“省 × 年”拆表则是全国 310 张表。
+3. **年份维度会爆炸**：年份做成列是 36 × 6 = 216 列起；按“省 × 年”拆表则是全国 310 张表。
 4. **跨省查询退化为 UNION ALL**：新增省份要改所有查询、视图和报表。
 5. **列名 → 指标无法用外键约束**：改列名/删列/拼写错误会让映射静默失效。
 6. **指标变更要 ALTER 所有省表**；长表只需在 `dim_index` 插一行。
@@ -46,7 +46,7 @@ mysql -u root -p --default-character-set=utf8mb4 < db/90_checks.sql
 | `00_database.sql` | 创建 `techfin` 库、字符集、会话时区；不删除已有库 |
 | `10_schema.sql` | 5 张核心表：`dim_region`、`dim_source_channel`、`dim_index`、`dim_index_measure`、`fact_index_value` |
 | `20_seed_region.sql` | 广东 21 市 + 122 个县级单位、东莞/中山市本级；附四川 4 行示例 |
-| `21_seed_index.sql` | 35 条三级指标、37 条口径、6 个来源渠道 |
+| `21_seed_index.sql` | 36 条三级指标、38 条口径、6 个来源渠道 |
 | `30_views.sql` | `v_index_actual`、`v_index_long`、`v_wide_column_map`、`v_wide_guangdong` |
 | `40_staging.sql` | `import_batch`、`stg_wide_guangdong`（宽表录入暂存） |
 | `50_optional_score.sql` | 可选：`fact_index_run` / `fact_index_score`，回存合成结果 |
@@ -229,7 +229,7 @@ ORDER BY level2_code, level3_code;
 ### 6.1 DataGrip 直接编辑长表（少量修正）
 
 1. 打开 `fact_index_value`。
-2. 过滤 `region_code = '440106' AND year = 2024`，主口径正好 35 行（A101/D102 如果还录了次口径，会额外多出几行）。
+2. 过滤 `region_code = '440106' AND year = 2024`，主口径正好 36 行（A101/D102 如果还录了次口径，会额外多出几行）。
 3. 修改 `value_num`、`value_unit`、`source_channel`、`source_authority`、`data_quality`、`evidence_ref` 等。
 4. `obs_status` 保持 `present`；`context_type` 保持 `actual`。
 5. 不要改 `region_code`、`level3_code`、`measure_code`，除非确实要纠正指标归属。
@@ -246,7 +246,7 @@ VALUES ('2026-10 广东统计年鉴补录', 'gd_2026.xlsx',
         'yearbook', 'official', 1, '2026年广东统计年鉴');
 ```
 
-2. 把宽表数据导入 `stg_wide_guangdong`：一行一个 `(region_code, year)`，指标列 `A101…D203`。所有指标列都是 `VARCHAR`，可以放“约2355家”“4.2%”“N/A”等脏值。
+2. 把宽表数据导入 `stg_wide_guangdong`：一行一个 `(region_code, year)`，指标列 `A101…D203`（C 类另含 C304）。所有指标列都是 `VARCHAR`，可以放“约2355家”“4.2%”“N/A”等脏值。
 3. 运行 loader（下一阶段实现）：
    - 校验 `region_code` 是否存在；
    - 校验指标与主口径是否存在；
@@ -364,8 +364,8 @@ loader 必须做：
 |---|---|
 | 广东县域分析单元 | 124 |
 | 广东 `region_type` 为 NULL | 0 |
-| 现行三级指标数 | 35 |
-| 口径数 | 37 |
+| 现行三级指标数 | 36 |
+| 口径数 | 38 |
 | 无主口径指标 / 多主口径指标 | 0 / 0 |
 | 孤儿区划 / 孤儿指标口径 | 0 / 0 |
 | 同一格重复行 | 0 |
@@ -392,7 +392,7 @@ WHERE region_code = '440100' AND level3_code = 'A103';
 |---|---|---|
 | `tech_finance_index_migration.sql` | 工作区现存 | **旧结构的增量迁移脚本**，假设旧表已存在；不要在新库 `techfin` 执行，保留作历史参考 |
 | `tech_finance_index.sql` | 已从工作区删除（仅 git HEAD） | 旧首建脚本，含旧权重列；不要恢复后直接执行 |
-| `A/A1`、`A/A2`、`A/A3/config/topic_config.py` | 现存 | 三个主题各自维护本组指标的检索词/区划；三份合起来覆盖 35 条指标，`dim_index` 种子与它们对齐 |
+| `A/A1`、`A/A2`、`A/A3/config/topic_config.py` | 现存 | 三个主题各自维护本组指标的检索词/区划；三份合起来覆盖 36 条指标，`dim_index` 种子与它们对齐 |
 | `A/A1`、`A/A2`、`A/A3/config/extract_config.py` | 现存 | `context_type`、`metric`、`unit` 的语义来源；A2/A3 的 `INDICATOR_SCOPE` 定义金额/占比/密度口径 |
 
 新库的唯一基线是本目录 `db/00—90`。未来结构变更请新增 `db/migrations/YYYYMMDD_NNN_描述.sql`，不要直接改 `10_schema.sql` 后重跑。
@@ -424,3 +424,4 @@ A：可以，结构不受影响；把 `00_database.sql` 的库名改掉，并在
 ## 13. 变更记录
 
 - 2026-10-23：建立 baseline。单库 `techfin`；长表事实 + 全局维度 + 轻量溯源；广东区划与 35 条指标种子；广东省宽表视图/暂存表；权重外置。
+- 2026-11-16：C3 的「独角兽、瞪羚企业数量」拆为 C301 独角兽、C304 瞪羚（36 条指标、38 条口径）；同步宽表视图与暂存表。

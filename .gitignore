@@ -83,6 +83,18 @@ B/*/tests/fixtures/**/coverage_*.json
 B/*/tests/fixtures/**/points_b*_*
 B/*/tests/fixtures/**/b*_llm_*
 
+# C/C1~C/C3 流水线与入库产物（主题独立数据根/报告根）。
+C/*/data/
+C/*/reports/db_load/
+C/*/tests/tmp_*/
+C/*/tests/fixtures/reports/
+C/*/tests/fixtures/**/curated_*.csv
+C/*/tests/fixtures/**/techfin_c*_points.csv
+C/*/tests/fixtures/**/coverage_*.csv
+C/*/tests/fixtures/**/coverage_*.json
+C/*/tests/fixtures/**/points_c*_*
+C/*/tests/fixtures/**/c*_llm_*
+
 # 运行目录命名「四位年.月.日-次数」与主题无关（A/A1、A/A2 均适用）。
 **/[0-9][0-9][0-9][0-9].[0-9]*.[0-9]*-[0-9]*/
 

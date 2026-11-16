@@ -159,6 +159,7 @@ SELECT
     MAX(CASE WHEN v.level3_code = 'C301' AND v.measure_code = 'count'    THEN v.value_num END) AS C301,
     MAX(CASE WHEN v.level3_code = 'C302' AND v.measure_code = 'growth'   THEN v.value_num END) AS C302,
     MAX(CASE WHEN v.level3_code = 'C303' AND v.measure_code = 'growth'   THEN v.value_num END) AS C303,
+    MAX(CASE WHEN v.level3_code = 'C304' AND v.measure_code = 'count'    THEN v.value_num END) AS C304,
 
     MAX(CASE WHEN v.level3_code = 'D101' AND v.measure_code = 'score'    THEN v.value_num END) AS D101,
     MAX(CASE WHEN v.level3_code = 'D102' AND v.measure_code = 'count'    THEN v.value_num END) AS D102,

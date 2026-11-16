@@ -32,10 +32,10 @@ WHERE region_code IN ('441900', '442000');
 -- ----------------------------------------------------------------------------
 -- 2. 指标与口径
 -- ----------------------------------------------------------------------------
-SELECT '现行三级指标数（应为 35）' AS 检查项, COUNT(*) AS 结果
+SELECT '现行三级指标数（应为 36）' AS 检查项, COUNT(*) AS 结果
 FROM dim_index WHERE status = 'active'
 UNION ALL
-SELECT '口径数（应为 37）', COUNT(*)
+SELECT '口径数（应为 38）', COUNT(*)
 FROM dim_index_measure
 UNION ALL
 SELECT '无主口径指标数（应为 0）', COUNT(*)
@@ -53,7 +53,7 @@ FROM (
     HAVING COUNT(*) > 1
 ) t
 UNION ALL
-SELECT '宽表映射列数（应为 35）', COUNT(*)
+SELECT '宽表映射列数（应为 36）', COUNT(*)
 FROM v_wide_column_map;
 
 -- 按一级维度统计指标数

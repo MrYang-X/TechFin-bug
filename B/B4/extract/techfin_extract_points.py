@@ -476,16 +476,18 @@ def _prefix_gate(prefix, scope):
 
 def _adapt_unit(sent, m, code):
     """
-    密度指标特例：把"每万人拥有银行网点 3.2 个"里的"个"改写为"个/万人"。
-    数字本身已经是每万人口径，不做数值换算。
+    密度指标特例：把"每万人拥有银行网点 3.2 个"/"每万人发明专利拥有量 52.3 件"
+    里的"个""件"改写为"个/万人""件/万人"。数字本身已经是每万人口径，不做数值换算。
     """
     unit = m.group("unit")
-    if code != "A204" or unit != "个":
+    scope = ec.INDICATOR_SCOPE.get(code, {})
+    if "density" not in (scope.get("metrics") or ()):
         return unit
-    clause, _, _ = _clause_at(sent, m.start())
-    prefix = sent[max(0, m.start() - 20):m.start()]
-    if "每万人" in clause or "每万人" in prefix:
-        return "个/万人"
+    if unit in ("个", "件", "家", "户"):
+        clause, _, _ = _clause_at(sent, m.start())
+        prefix = sent[max(0, m.start() - 20):m.start()]
+        if any(k in clause or k in prefix for k in ("每万人", "每万人口")):
+            return unit + "/万人"
     return unit
 
 
@@ -520,6 +522,10 @@ def extract_sentence(sent, window, offset, label, article, meta, idx, doc_text="
 
         clause, clause_left, _ = _clause_at(sent, m.start())
         prefix = sent[max(0, m.start() - 30):m.start()]
+        # 指标级互斥正则（如 C301/C304 的"独角兽、瞪羚企业共X家"合并口径）。
+        reject_re = scope.get("reject_pattern")
+        if reject_re is not None and reject_re.search(prefix):
+            continue
         # 非目标主语比指标词更靠近数字时拒绝：如"风险补偿资金池累计补偿金额5000万元"
         # 里的 5000 万元属于"补偿金额"，不是资金池规模。
         subjects = scope.get("non_target_subjects", _NON_TARGET_SUBJECTS)

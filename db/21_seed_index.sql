@@ -4,7 +4,7 @@
 -- 依赖：10_schema.sql、20_seed_region.sql
 --
 -- 数据来源：
---   - 35 条三级指标的名称/编码与 A/A1/config/topic_config.py 的 INDEX_KEYWORDS 对齐。
+--   - 36 条三级指标的名称/编码与 A/A1/config/topic_config.py 的 INDEX_KEYWORDS 对齐。
 --   - 一级维度：A 科技金融资源基础 / B 科技金融活动强度 /
 --               C 科技金融产出效能 / D 科技金融生态环境。
 --   - 权重不在此脚本中：权重唯一权威是表外配置文件（如 config/weights/weights_v1.yaml）。
@@ -82,9 +82,10 @@ INSERT INTO dim_index
 ('C201','C2','经济发展贡献','C','科技金融产出效能','高新技术产业产值占规上工业产值比重',1,NULL,'active',1,NULL),
 ('C202','C2','经济发展贡献','C','科技金融产出效能','科技服务业增加值',1,NULL,'active',2,NULL),
 
-('C301','C3','企业成长性','C','科技金融产出效能','"独角兽"、"瞪羚"企业数量',1,NULL,'active',1,NULL),
+('C301','C3','企业成长性','C','科技金融产出效能','独角兽企业数量',1,NULL,'active',1,NULL),
 ('C302','C3','企业成长性','C','科技金融产出效能','科技企业营收增长率',1,NULL,'active',2,NULL),
 ('C303','C3','企业成长性','C','科技金融产出效能','科技企业利润增长率',1,NULL,'active',3,NULL),
+('C304','C3','企业成长性','C','科技金融产出效能','瞪羚企业数量',1,NULL,'active',4,NULL),
 
 -- D 科技金融生态环境
 ('D101','D1','政策与服务环境','D','科技金融生态环境','科技金融政策完备度（专家打分）',1,NULL,'active',1,'可考虑县级科技金融政策文本评分'),
@@ -150,6 +151,7 @@ INSERT INTO dim_index_measure
 ('C301','count',      '企业数量',                 '家',       'numeric', 1, 1),
 ('C302','growth',     '营收增长率',               '%',        'numeric', 1, 1),
 ('C303','growth',     '利润增长率',               '%',        'numeric', 1, 1),
+('C304','count',      '企业数量',                 '家',       'numeric', 1, 1),
 
 ('D101','score',      '政策完备度评分',           '分',       'score',   1, 1),
 ('D102','count',      '服务中心/网点数量',        '个',       'numeric', 1, 1),
@@ -165,7 +167,7 @@ ON DUPLICATE KEY UPDATE
     is_primary    = VALUES(is_primary),
     sort_order    = VALUES(sort_order);
 
--- 自检（应输出 35 / 37 / 0 / 0）：
+-- 自检（应输出 36 / 38 / 0 / 0）：
 -- SELECT COUNT(*) AS 指标数 FROM dim_index;
 -- SELECT COUNT(*) AS 口径数 FROM dim_index_measure;
 -- SELECT COUNT(*) AS 无主口径指标数

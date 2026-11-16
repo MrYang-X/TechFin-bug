@@ -85,7 +85,7 @@ CREATE TABLE IF NOT EXISTS stg_wide_guangdong (
     evidence_ref      TEXT NULL
                       COMMENT '本行证据 article_id，多个用逗号分隔',
 
-    -- 35 个三级指标（主口径），列名 = level3_code
+    -- 36 个三级指标（主口径），列名 = level3_code
     A101 VARCHAR(100) DEFAULT NULL,
     A102 VARCHAR(100) DEFAULT NULL,
     A103 VARCHAR(100) DEFAULT NULL,
@@ -116,6 +116,7 @@ CREATE TABLE IF NOT EXISTS stg_wide_guangdong (
     C301 VARCHAR(100) DEFAULT NULL,
     C302 VARCHAR(100) DEFAULT NULL,
     C303 VARCHAR(100) DEFAULT NULL,
+    C304 VARCHAR(100) DEFAULT NULL,
     D101 VARCHAR(100) DEFAULT NULL,
     D102 VARCHAR(100) DEFAULT NULL,
     D201 VARCHAR(100) DEFAULT NULL,
