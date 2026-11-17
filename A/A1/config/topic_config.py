@@ -574,52 +574,9 @@ INDEX_KEYWORDS = {
         ],
     },
 
-    "D1": {
-        "level1_code": "D",
-        "level1_name": "科技金融生态环境",
-        "level1_weight": 10.00,
-        "level2_name": "政策与服务环境",
-        "indicators": [
-            {
-                "level3_code": "D101",
-                "level3_name": "科技金融政策完备度（专家打分）",
-                "unit": "分",
-                "queries": ["科技金融 政策", "科技金融 政策体系", "科技金融 实施方案"],
-            },
-            {
-                "level3_code": "D102",
-                "level3_name": "科技金融服务中心/网点覆盖情况",
-                "unit": "个或%",
-                "queries": ["科技金融服务中心", "科技金融服务 网点", "科技金融 服务站"],
-            },
-        ],
-    },
-    "D2": {
-        "level1_code": "D",
-        "level1_name": "科技金融生态环境",
-        "level1_weight": 10.00,
-        "level2_name": "人力与创新环境",
-        "indicators": [
-            {
-                "level3_code": "D201",
-                "level3_name": "R&D人员全时当量",
-                "unit": "人年",
-                "queries": ["R&D人员全时当量", "研发人员 全时当量", "R&D人员"],
-            },
-            {
-                "level3_code": "D202",
-                "level3_name": "普通高等学校数量",
-                "unit": "所",
-                "queries": ["普通高等学校 数量", "高等学校 数量", "高校 数量"],
-            },
-            {
-                "level3_code": "D203",
-                "level3_name": "数字经济发展指数",
-                "unit": "指数值",
-                "queries": ["数字经济发展指数", "数字经济 指数", "数字经济 发展水平"],
-            },
-        ],
-    },
+    # 注：D 维度（科技金融生态环境）已拆为正式主题 D/D1～D/D2，不再放在 A1 的
+    # INDEX_KEYWORDS 里，避免 A1 清洗层把 D102/D201/D203 词族带进 indicator_codes_all
+    # 与 AUTH_KEYWORDS。
 }
 
 # 锚点词（OR 集）：指标判别词偏泛，命中后还须与下列【任一】锚点共现才入库。

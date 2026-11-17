@@ -709,10 +709,11 @@ python tests/test_accuracy_regression.py
 
 ## 新增一个主题要做什么
 
-> B、C 主题已按本节模式落地：`B/B1`～`B/B4` 与 `C/C1`～`C/C3` 均与本目录同源，只替换
-> `config/topic_config.py`、`config/extract_config.py`、`tests/` 与 README；可对照
+> B、C、D 主题已按本节模式落地：`B/B1`～`B/B4`、`C/C1`～`C/C3` 与 `D/D1`～`D/D2`
+> 均与本目录同源，只替换 `config/topic_config.py`、`config/extract_config.py`、
+> `tests/` 与 README；可对照
 > [`B/B1`](../../B/B1/README.md)、[`B/README.md`](../../B/README.md)、
-> [`C/README.md`](../../C/README.md)。
+> [`C/README.md`](../../C/README.md)、[`D/README.md`](../../D/README.md)。
 
 照抄本目录新建一个二级目录（如 `A/A2`），**复制整个 `A/A1` 目录结构**（各子目录
 `config/ collect/ fetch/ clean/ extract/ report/ load/` + `run_all.py` + README），然后**主要改以下五处**：
